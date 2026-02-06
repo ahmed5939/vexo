@@ -1,0 +1,361 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Music Bot Analytics</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/dashboard.css">
+</head>
+
+<body>
+    <header class="top-bar">
+        <div class="top-logo">
+            <span style="font-size: 1.5rem;">🎵</span> Music Bot
+        </div>
+
+        <div class="server-nav" id="server-nav">
+            <div class="server-nav-item active" onclick="switchScope('global')">test</div>
+            <!-- Populated by JS -->
+        </div>
+
+        <div class="top-actions">
+            <!-- Settings button removed (moved to tab) -->
+            <div class="notification-badge" onclick="toggleNotifications()">
+                <button class="btn-icon">🔔</button>
+                <div class="badge-dot" id="notif-dot" style="display: none;"></div>
+                <div class="notifications-dropdown" id="notif-dropdown">
+                    <div class="notif-header">Notifications</div>
+                    <div class="notif-list" id="notif-list">
+                        <div class="notif-item" style="color: var(--text-muted); text-align: center;">No new
+                            notifications</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <div class="app">
+        <aside class="sidebar">
+            <div class="logo">
+                <span class="logo-icon">🎵</span>
+                <span>Music Bot</span>
+            </div>
+
+            <nav>
+                <ul class="nav">
+                    <li class="nav-item"><a href="#" class="nav-link tab active" data-tab="dashboard">📊 Dashboard</a>
+                    </li>
+                    <li class="nav-item"><a href="#" class="nav-link tab" data-tab="library">📚 Song Library</a></li>
+                    <li class="nav-item"><a href="#" class="nav-link tab" data-tab="songs">🕒 Song History</a></li>
+                    <li class="nav-item"><a href="#" class="nav-link tab" data-tab="users">👥 Users</a></li>
+                    <li class="nav-item"><a href="#" class="nav-link tab" data-tab="servers">🏠 Servers</a></li>
+                    <li class="nav-item"><a href="#" class="nav-link tab" data-tab="settings">⚙️ Settings</a></li>
+                    <li class="nav-item"><a href="#" class="nav-link tab" data-tab="logs">📜 Logs</a></li>
+                </ul>
+            </nav>
+
+            <div class="status-card">
+                <div style="display: flex; align-items: center; gap: 0.5rem;">
+                    <span class="status-dot status-online"></span>
+                    <span id="status-text">Connecting...</span>
+                </div>
+                <div style="margin-top: 0.5rem; font-size: 0.8rem; color: var(--text-muted);">
+                    Latency: <span id="stat-latency">--</span>
+                </div>
+            </div>
+        </aside>
+
+        <main class="main">
+            <!-- DASHBOARD TAB -->
+            <div id="tab-dashboard" class="tab-content active">
+                <div class="stats-grid">
+                    <div class="card">
+                        <div class="stat-value" id="stat-guilds">0</div>
+                        <div class="stat-label">Servers</div>
+                    </div>
+                    <div class="card">
+                        <div class="stat-value" id="stat-voice">0</div>
+                        <div class="stat-label">Active Sessions</div>
+                    </div>
+                    <div class="card">
+                        <div class="stat-value" id="stat-songs">0</div>
+                        <div class="stat-label">Total Songs</div>
+                    </div>
+                    <div class="card">
+                        <div class="stat-value" id="stat-users">0</div>
+                        <div class="stat-label">Total Users</div>
+                    </div>
+                    <div class="card">
+                        <div class="stat-value" id="stat-plays">0</div>
+                        <div class="stat-label">Total Plays</div>
+                    </div>
+                    <div class="card">
+                        <div class="stat-value"><span id="stat-cpu">0</span>%</div>
+                        <div class="stat-label">CPU Usage</div>
+                    </div>
+                    <div class="card">
+                        <div class="stat-value"><span id="stat-ram">0</span>%</div>
+                        <div class="stat-label">RAM Usage</div>
+                    </div>
+                    <div class="card">
+                        <div class="stat-value" id="stat-latency-val">0ms</div>
+                        <div class="stat-label">Latency</div>
+                    </div>
+                </div>
+
+                <div class="card now-playing" id="now-playing" style="margin-bottom: 1.5rem;">
+                    <div class="np-content" style="justify-content: center;">
+                        <span style="color: var(--text-muted);">Nothing playing</span>
+                    </div>
+                </div>
+
+                <div class="content-grid">
+                    <div class="card">
+                        <div class="card-header">
+                            <h2 class="card-title">🔥 Most Played Songs</h2>
+                        </div>
+                        <div class="table-container">
+                            <table>
+                                <thead>
+                                    <tr>
+                                        <th>#</th>
+                                        <th>Song</th>
+                                        <th>Plays</th>
+                                        <th>Likes</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="top-songs-table">
+                                    <tr>
+                                        <td colspan="4" style="text-align: center; color: var(--text-muted);">Loading...
+                                        </td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+
+                    <div class="card">
+                        <div class="card-header">
+                            <h2 class="card-title">👥 Top Users</h2>
+                        </div>
+                        <div class="user-list" id="top-users-list">
+                            <div style="text-align: center; color: var(--text-muted);">Loading...</div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Music Insights Grid -->
+                <div class="content-grid" style="grid-template-columns: repeat(3, 1fr); margin-top: 1.5rem;">
+                    <div class="card">
+                        <div class="card-header">
+                            <h2 class="card-title">❤️ Most Liked</h2>
+                        </div>
+                        <div id="liked-stats" class="insights-list">
+                            <div class="insight-item" style="margin-bottom: 1rem;">
+                                <div class="stat-label">Genre</div>
+                                <div class="insight-value" id="insight-liked-genre" style="font-weight: 600;">-</div>
+                            </div>
+                            <div class="insight-item" style="margin-bottom: 1rem;">
+                                <div class="stat-label">Artist</div>
+                                <div class="insight-value" id="insight-liked-artist" style="font-weight: 600;">-</div>
+                            </div>
+                            <div class="insight-item">
+                                <div class="stat-label">Song</div>
+                                <div class="insight-value" id="insight-liked-song"
+                                    style="font-weight: 600; font-size: 0.9rem;">-</div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="card">
+                        <div class="card-header">
+                            <h2 class="card-title">🎧 Top Played</h2>
+                        </div>
+                        <div id="played-stats" class="insights-list">
+                            <div class="insight-item" style="margin-bottom: 1rem;">
+                                <div class="stat-label">Most Played Genre</div>
+                                <div class="insight-value" id="insight-played-genre" style="font-weight: 600;">-</div>
+                            </div>
+                            <div class="insight-item">
+                                <div class="stat-label">Most Played Artist</div>
+                                <div class="insight-value" id="insight-played-artist" style="font-weight: 600;">-</div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="card">
+                        <div class="card-header">
+                            <h2 class="card-title">🏆 Useful Users</h2>
+                        </div>
+                        <div id="useful-users-list" class="user-list">
+                            <div style="text-align: center; color: var(--text-muted);">Loading...</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- LIBRARY TAB -->
+            <div id="tab-library" class="tab-content" style="display: none;">
+                <div class="card">
+                    <div class="card-header">
+                        <h2 class="card-title">📚 Song Library</h2>
+                    </div>
+                    <div class="table-container">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>Title</th>
+                                    <th>Artist</th>
+                                    <th>Genre</th>
+                                    <th>Source(s)</th>
+                                    <th>Added By</th>
+                                    <th>Added At</th>
+                                </tr>
+                            </thead>
+                            <tbody id="library-list">
+                                <tr>
+                                    <td colspan="6" style="text-align: center; color: var(--text-muted);">Loading...
+                                    </td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+            <!-- SONGS TAB -->
+            <div id="tab-songs" class="tab-content" style="display: none;">
+                <div class="card">
+                    <div class="card-header">
+                        <h2 class="card-title">🕒 Playback History</h2>
+                    </div>
+                    <div class="table-container">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>Title</th>
+                                    <th>Artist</th>
+                                    <th>Duration</th>
+                                    <th>Genre</th>
+                                    <th>Requested By</th>
+                                    <th>Liked By</th>
+                                    <th>Disliked By</th>
+                                    <th>Played At</th>
+                                </tr>
+                            </thead>
+                            <tbody id="songs-list">
+                                <tr>
+                                    <td colspan="4" style="text-align: center; color: var(--text-muted);">Loading...
+                                    </td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
+            <!-- USERS TAB -->
+            <div id="tab-users" class="tab-content" style="display: none;">
+                <div class="card">
+                    <div class="card-header">
+                        <h2 class="card-title">👥 User Directory</h2>
+                    </div>
+                    <div class="user-list" id="users-directory">
+                        <div style="text-align: center; color: var(--text-muted);">Loading...</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- SERVERS TAB -->
+            <div id="tab-servers" class="tab-content" style="display: none;">
+                <div class="card">
+                    <div class="card-header">
+                        <h2 class="card-title">🏠 Active Servers</h2>
+                    </div>
+                    <div class="user-list" id="guild-list">
+                        <div style="text-align: center; color: var(--text-muted);">Loading...</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- SETTINGS TAB -->
+            <!-- SETTINGS TAB -->
+            <div id="tab-settings" class="tab-content" style="display: none;">
+                <div class="card">
+                    <div class="card-header">
+                        <h2 class="card-title" id="settings-title">⚙️ Settings</h2>
+                    </div>
+                    <div class="card-body">
+                        <!-- GLOBAL SETTINGS -->
+                        <div id="settings-global" style="display: none;">
+                            <div class="form-group">
+                                <label class="form-label">Max Concurrent Servers</label>
+                                <input type="number" id="setting-max-servers-tab" class="form-input"
+                                    placeholder="Default: Unlimited" style="max-width: 300px;">
+                                <div style="font-size: 0.8rem; color: var(--text-muted); margin-top: 0.5rem;">
+                                    If the bot is in more servers than this limit, it will auto-leave new joins.
+                                </div>
+                            </div>
+                            <div style="margin-top: 2rem;">
+                                <button class="btn btn-primary" onclick="saveSettingsTab()">Save Global
+                                    Settings</button>
+                            </div>
+                        </div>
+
+                        <!-- SERVER SETTINGS -->
+                        <div id="settings-server" style="display: none;">
+                            <div class="form-group"
+                                style="display: flex; align-items: center; justify-content: space-between;">
+                                <div>
+                                    <label class="form-label">Pre-Buffering</label>
+                                    <div style="font-size: 0.8rem; color: var(--text-muted);">
+                                        Pre-load the next song for gapless playback.
+                                    </div>
+                                </div>
+                                <div>
+                                    <input type="checkbox" id="setting-pre-buffer" style="transform: scale(1.5);">
+                                </div>
+                            </div>
+
+                            <div class="form-group" style="margin-top: 1.5rem;">
+                                <label class="form-label">Buffer Amount (Songs)</label>
+                                <div style="display: flex; align-items: center; gap: 1rem;">
+                                    <input type="range" id="setting-buffer-amount" min="1" max="10" value="1"
+                                        style="width: 100%;"
+                                        oninput="document.getElementById('buffer-val').textContent = this.value">
+                                    <span id="buffer-val" style="font-weight: 600; min-width: 30px;">1</span>
+                                </div>
+                                <div style="font-size: 0.8rem; color: var(--text-muted); margin-top: 0.5rem;">
+                                    Number of upcoming songs to keep ready in memory.
+                                </div>
+                            </div>
+
+                            <div style="margin-top: 2rem;">
+                                <button class="btn btn-primary" onclick="saveServerSettings()">Save Server
+                                    Settings</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- LOGS TAB -->
+            <div id="tab-logs" class="tab-content" style="display: none;">
+                <div class="card" style="height: 80vh;">
+                    <div class="card-header">
+                        <h2 class="card-title">📜 Live System Logs</h2>
+                    </div>
+                    <div class="logs" id="logs" style="height: 100%;"></div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <script src="/static/dashboard.js"></script>
+
+    <!-- Global Settings Modal Removed (Logic moved to Settings Tab) -->
+</body>
+
+</html>

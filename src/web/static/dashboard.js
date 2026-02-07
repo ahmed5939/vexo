@@ -28,12 +28,14 @@ const logState = {
     maxEntries: 1000,
     autoScroll: true,
     levelFilter: 'all',    // 'all' | 'DEBUG' | 'INFO' | 'WARNING' | 'ERROR'
+    categoryFilter: '',    // Filter by category (playback, voice, discovery, api, system, etc)
     searchQuery: '',
     sourceFilter: '',
     guildFilter: '',
     counts: { all: 0, DEBUG: 0, INFO: 0, WARNING: 0, ERROR: 0 },
     knownSources: new Set(),
     knownGuilds: new Map(), // guild_id -> name
+    knownCategories: new Set(['playback', 'voice', 'queue', 'discovery', 'api', 'database', 'system', 'user', 'preference', 'import']),
     wsConnected: false,
     searchTimeout: null,
 };
@@ -113,6 +115,17 @@ function initLogControls() {
             logState.guildFilter = guildSelect.value;
             applyLogFilters();
         });
+    }
+
+    // Category filter
+    const categorySelect = document.getElementById('log-filter-category');
+    if (categorySelect) {
+        categorySelect.addEventListener('change', () => {
+            logState.categoryFilter = categorySelect.value;
+            applyLogFilters();
+        });
+        // Populate initial category options
+        updateCategoryFilter();
     }
 
     // Auto-scroll toggle
@@ -202,15 +215,18 @@ function updateWsStatus(connected) {
 // ============================================================
 // LOG ENTRY PROCESSING
 // ============================================================
-function addLogEntry(log) {
-    // Store entry
+function addLogEntry(logData) {
+    // Store entry - use category/event directly from WebSocket if available
     const entry = {
-        timestamp: log.timestamp,
-        level: log.level || 'INFO',
-        message: log.message || '',
-        logger: log.logger || '',
-        guild_id: log.guild_id || null,
-        parsed: parseLogMessage(log.message || ''),
+        timestamp: logData.timestamp,
+        level: logData.level || 'INFO',
+        message: logData.message || '',
+        logger: logData.logger || '',
+        guild_id: logData.guild_id || null,
+        category: logData.category || null,
+        event: logData.event || null,
+        fields: logData.fields || {},
+        parsed: parseLogMessage(logData.message || ''),
     };
 
     logState.entries.push(entry);
@@ -331,6 +347,7 @@ function createLogRow(entry) {
     row.dataset.level = entry.level;
     row.dataset.source = shortenLogger(entry.logger);
     row.dataset.guild = entry.guild_id || '';
+    row.dataset.category = entry.category || '';
 
     // Timestamp
     const ts = document.createElement('span');
@@ -346,6 +363,14 @@ function createLogRow(entry) {
     const body = document.createElement('span');
     body.className = 'log-body';
 
+    // Category badge (shown first if available)
+    if (entry.category) {
+        const catBadge = document.createElement('span');
+        catBadge.className = `log-category log-category-${entry.category}`;
+        catBadge.textContent = entry.category;
+        body.appendChild(catBadge);
+    }
+
     // Source badge
     const shortSource = shortenLogger(entry.logger);
     if (shortSource) {
@@ -355,17 +380,32 @@ function createLogRow(entry) {
         body.appendChild(source);
     }
 
-    // Parsed content
-    const parsed = entry.parsed;
-    if (parsed.event) {
+    // Event name (prefer entry.event from WebSocket, fallback to parsed)
+    const eventName = entry.event || entry.parsed.event;
+    if (eventName) {
         const eventEl = document.createElement('span');
         eventEl.className = 'log-event';
-        eventEl.textContent = parsed.event;
+        eventEl.textContent = eventName;
         body.appendChild(eventEl);
     }
 
-    if (parsed.pairs.length > 0) {
-        parsed.pairs.forEach(({ key, val }) => {
+    // Key-value pairs from fields (prefer WebSocket fields) or parsed
+    const fields = Object.keys(entry.fields || {}).length > 0 ? entry.fields : {};
+    const pairs = entry.parsed.pairs || [];
+
+    // Render fields from WebSocket
+    for (const [key, val] of Object.entries(fields)) {
+        if (key === 'category') continue; // Already shown as badge
+        const kv = document.createElement('span');
+        kv.className = 'log-kv';
+        kv.innerHTML = `<span class="log-kv-key">${escapeHtml(key)}</span><span class="log-kv-eq">=</span><span class="log-kv-val">${escapeHtml(String(val))}</span>`;
+        body.appendChild(kv);
+    }
+
+    // Render parsed pairs (if no WebSocket fields)
+    if (Object.keys(fields).length === 0 && pairs.length > 0) {
+        pairs.forEach(({ key, val }) => {
+            if (key === 'category') return; // Already shown as badge
             const kv = document.createElement('span');
             kv.className = 'log-kv';
             kv.innerHTML = `<span class="log-kv-key">${escapeHtml(key)}</span><span class="log-kv-eq">=</span><span class="log-kv-val">${escapeHtml(val)}</span>`;
@@ -373,15 +413,17 @@ function createLogRow(entry) {
         });
     }
 
+    // Remaining text (if any)
+    const parsed = entry.parsed;
     if (parsed.text) {
         const msgEl = document.createElement('span');
         msgEl.className = 'log-msg';
-        msgEl.textContent = parsed.event || parsed.pairs.length > 0 ? ' ' + parsed.text : parsed.text;
+        msgEl.textContent = (eventName || Object.keys(fields).length > 0 || pairs.length > 0) ? ' ' + parsed.text : parsed.text;
         body.appendChild(msgEl);
     }
 
     // If no structured content was generated, show raw message
-    if (!parsed.event && parsed.pairs.length === 0 && !parsed.text) {
+    if (!eventName && Object.keys(fields).length === 0 && pairs.length === 0 && !parsed.text) {
         const msgEl = document.createElement('span');
         msgEl.className = 'log-msg';
         msgEl.textContent = entry.message;
@@ -393,6 +435,8 @@ function createLogRow(entry) {
     detail.className = 'log-detail';
     detail.innerHTML = `
         <div class="log-detail-line"><span class="log-detail-label">Level</span> <span class="log-detail-value">${entry.level}</span></div>
+        ${entry.category ? `<div class="log-detail-line"><span class="log-detail-label">Category</span> <span class="log-detail-value">${entry.category}</span></div>` : ''}
+        ${eventName ? `<div class="log-detail-line"><span class="log-detail-label">Event</span> <span class="log-detail-value">${eventName}</span></div>` : ''}
         <div class="log-detail-line"><span class="log-detail-label">Source</span> <span class="log-detail-value">${escapeHtml(entry.logger)}</span></div>
         ${entry.guild_id ? `<div class="log-detail-line"><span class="log-detail-label">Guild</span> <span class="log-detail-value">${entry.guild_id}</span></div>` : ''}
         <div class="log-detail-line"><span class="log-detail-label">Raw</span> <span class="log-detail-value">${escapeHtml(entry.message)}</span></div>
@@ -445,6 +489,11 @@ function applyLogFilters() {
 function matchesFilters(entry) {
     // Level filter
     if (logState.levelFilter !== 'all' && entry.level !== logState.levelFilter) {
+        return false;
+    }
+
+    // Category filter
+    if (logState.categoryFilter && entry.category !== logState.categoryFilter) {
         return false;
     }
 
@@ -508,6 +557,16 @@ function updateGuildFilter() {
         if (id === current) opt.selected = true;
         select.appendChild(opt);
     }
+}
+
+function updateCategoryFilter() {
+    const select = document.getElementById('log-filter-category');
+    if (!select) return;
+    const current = select.value;
+    const sorted = [...logState.knownCategories].sort();
+    select.innerHTML = '<option value="">All Categories</option>' + sorted.map(c =>
+        `<option value="${c}"${c === current ? ' selected' : ''}>${c.charAt(0).toUpperCase() + c.slice(1)}</option>`
+    ).join('');
 }
 
 function scrollLogsToBottom() {

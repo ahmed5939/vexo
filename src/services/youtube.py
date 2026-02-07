@@ -15,7 +15,9 @@ import random
 import time
 from functools import wraps
 
-logger = logging.getLogger(__name__)
+from src.utils.logging import get_logger, Category, Event
+
+log = get_logger(__name__)
 
 
 def retry_with_backoff(retries=3, backoff_in_seconds=1):
@@ -28,11 +30,11 @@ def retry_with_backoff(retries=3, backoff_in_seconds=1):
                     return await func(*args, **kwargs)
                 except Exception as e:
                     if x == retries:
-                        logger.error(f"Failed after {retries} retries: {e}")
+                        log.event(Category.API, Event.API_ERROR, level=logging.ERROR, retries=retries, error=str(e))
                         raise
                     else:
                         sleep = (backoff_in_seconds * 2 ** x + random.uniform(0, 1))
-                        logger.warning(f"Retry {x + 1}/{retries} for {func.__name__} after {sleep:.2f}s due to: {e}")
+                        log.warning_cat(Category.API, f"Retry {x + 1}/{retries} for {func.__name__}", sleep=f"{sleep:.2f}s", error=str(e))
                         await asyncio.sleep(sleep)
                         x += 1
         return wrapper
@@ -108,7 +110,7 @@ class YouTubeService:
             
             return tracks
         except Exception as e:
-            logger.error(f"YouTube search error: {e}")
+            log.event(Category.API, Event.SEARCH_FAILED, level=logging.ERROR, service="youtube", error=str(e))
             return []
     
     @retry_with_backoff()
@@ -140,7 +142,7 @@ class YouTubeService:
             
             return tracks
         except Exception as e:
-            logger.error(f"Error getting watch playlist: {e}")
+            log.error_cat(Category.API, "Error getting watch playlist", error=str(e))
             return []
     
     @retry_with_backoff()
@@ -171,7 +173,7 @@ class YouTubeService:
             
             return tracks
         except Exception as e:
-            logger.error(f"Error getting playlist: {e}")
+            log.error_cat(Category.API, "Error getting playlist", error=str(e))
             return []
     
     async def get_stream_url(self, video_id: str) -> str | None:
@@ -187,7 +189,7 @@ class YouTubeService:
             
             return await loop.run_in_executor(None, extract)
         except Exception as e:
-            logger.error(f"Error getting stream URL for {video_id}: {e}")
+            log.event(Category.API, Event.API_ERROR, level=logging.ERROR, service="youtube", video_id=video_id, error=str(e))
             return None
     
     @retry_with_backoff()
@@ -208,7 +210,7 @@ class YouTubeService:
                 for r in results if r.get("browseId")
             ]
         except Exception as e:
-            logger.error(f"Error searching playlists: {e}")
+            log.error_cat(Category.API, "Error searching playlists", error=str(e))
             return []
     
     def _parse_duration(self, duration_str: str) -> int | None:

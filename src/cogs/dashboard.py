@@ -13,29 +13,70 @@ from aiohttp import web
 
 from discord.ext import commands
 
-logger = logging.getLogger(__name__)
+from src.utils.logging import get_logger, Category, Event
+
+log = get_logger(__name__)
 
 STATIC_DIR = Path(__file__).parent.parent / "web" / "static"
 TEMPLATE_DIR = Path(__file__).parent.parent / "web" / "templates"
 
 
 class WebSocketLogHandler(logging.Handler):
-    """Log handler that broadcasts to WebSocket clients."""
+    """Log handler that broadcasts to WebSocket clients with structured parsing."""
     
     def __init__(self, ws_manager, loop):
         super().__init__()
         self.ws_manager = ws_manager
         self.loop = loop
     
+    def _parse_structured(self, message: str) -> dict:
+        """Parse structured log message for category/event fields.
+        
+        Expected format: event_name category=cat key=value key2='quoted value'
+        """
+        import re
+        result = {"category": None, "event": None, "fields": {}}
+        
+        if not message:
+            return result
+        
+        # Extract key=value pairs (handles quoted values)
+        kv_regex = r'(\w+)=(?:\'([^\']*)\'|"([^"]*)"|(\S+))'
+        pairs = {}
+        for match in re.finditer(kv_regex, message):
+            key = match.group(1)
+            val = match.group(2) or match.group(3) or match.group(4)
+            pairs[key] = val
+        
+        # Extract category if present
+        if "category" in pairs:
+            result["category"] = pairs.pop("category")
+        
+        result["fields"] = pairs
+        
+        # First word before any key=value might be the event name
+        cleaned = re.sub(kv_regex, '', message).strip()
+        words = cleaned.split()
+        if words and re.match(r'^[a-z_][a-z0-9_]*$', words[0]):
+            result["event"] = words[0]
+        
+        return result
+    
     def emit(self, record):
         if self.ws_manager.clients:
             try:
+                message = record.getMessage()
+                parsed = self._parse_structured(message)
+                
                 log_entry = {
                     "timestamp": record.created,
                     "level": record.levelname,
-                    "message": record.getMessage(),
+                    "message": message,
                     "logger": record.name,
                     "guild_id": getattr(record, "guild_id", None),
+                    "category": parsed["category"],
+                    "event": parsed["event"],
+                    "fields": parsed["fields"],
                 }
                 
                 # Check if we're in the same loop
@@ -99,7 +140,7 @@ class DashboardCog(commands.Cog):
         site = web.TCPSite(self.runner, self.host, self.port)
         await site.start()
         
-        logger.info(f"Dashboard at http://{self.host}:{self.port}")
+        log.event(Category.SYSTEM, "dashboard_started", host=self.host, port=self.port)
     
     async def cog_unload(self):
         if self._log_handler:
@@ -500,7 +541,7 @@ class DashboardCog(commands.Cog):
         crud = LibraryCRUD(self.bot.db)
         library = await crud.get_library(guild_id=guild_id)
         
-        logger.info(f"Fetched library for guild {guild_id}: {len(library)} entries")
+        # Omit verbose logging for API calls
         
         # Serialize timestamps
         for entry in library:

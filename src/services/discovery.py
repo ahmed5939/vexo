@@ -9,11 +9,12 @@ from typing import TYPE_CHECKING
 from src.services.youtube import YouTubeService, YTTrack
 from src.services.spotify import SpotifyService
 from src.services.normalizer import SongNormalizer
+from src.utils.logging import get_logger, Category, Event
 
 if TYPE_CHECKING:
     from src.database.crud import PreferenceCRUD, PlaybackCRUD, ReactionCRUD
 
-logger = logging.getLogger(__name__)
+log = get_logger(__name__)
 
 
 @dataclass
@@ -138,7 +139,7 @@ class DiscoveryEngine:
         strategy_weights = [weights[s] for s in strategies]
         strategy = random.choices(strategies, weights=strategy_weights, k=1)[0]
         
-        logger.info(f"Discovery for user {turn_user_id} using strategy: {strategy} (avoiding {len(recent_yt_ids)} recent songs)")
+        log.event(Category.DISCOVERY, Event.STRATEGY_SELECTED, user_id=turn_user_id, strategy=strategy, cooldown_songs=len(recent_yt_ids))
         
         # Execute strategy
         song = await self._execute_strategy(strategy, turn_user_id, recent_yt_ids)

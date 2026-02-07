@@ -11,8 +11,9 @@ from discord.ext import commands
 from src.services.spotify import SpotifyService
 from src.services.youtube import YouTubeService
 from src.services.normalizer import SongNormalizer
+from src.utils.logging import get_logger, Category, Event
 
-logger = logging.getLogger(__name__)
+log = get_logger(__name__)
 
 
 class ImportCog(commands.Cog):
@@ -111,7 +112,7 @@ class ImportCog(commands.Cog):
                                     for g in track.genres:
                                         await song_crud.add_genre(song["id"], g, "spotify")
                         except Exception as e:
-                            logger.error(f"Failed to record imported song {track.title}: {e}")
+                            log.error_cat(Category.IMPORT, "Failed to record imported song", title=track.title, error=str(e))
                 
                 await interaction.edit_original_response(
                     content=f"✅ **Playlist imported!**\n"
@@ -126,7 +127,7 @@ class ImportCog(commands.Cog):
                 )
         
         except Exception as e:
-            logger.error(f"Error importing Spotify playlist: {e}")
+            log.event(Category.IMPORT, "import_failed", level=logging.ERROR, platform="spotify", error=str(e))
             await interaction.edit_original_response(content=f"❌ Error: {e}")
     
     async def _import_youtube(self, interaction: discord.Interaction, url: str):
@@ -216,7 +217,7 @@ class ImportCog(commands.Cog):
                                     for g in track.genres:
                                         await song_crud.add_genre(song["id"], g, "spotify")
                         except Exception as e:
-                            logger.error(f"Failed to record imported YT song {track.title}: {e}")
+                            log.error_cat(Category.IMPORT, "Failed to record imported YT song", title=track.title, error=str(e))
                 
                 await interaction.edit_original_response(
                     content=f"✅ **Playlist imported!**\n"
@@ -231,7 +232,7 @@ class ImportCog(commands.Cog):
                 )
         
         except Exception as e:
-            logger.error(f"Error importing YouTube playlist: {e}")
+            log.event(Category.IMPORT, "import_failed", level=logging.ERROR, platform="youtube", error=str(e))
             await interaction.edit_original_response(content=f"❌ Error: {e}")
     
     def _extract_yt_playlist_id(self, url: str) -> str | None:

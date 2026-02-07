@@ -739,8 +739,7 @@ class AnalyticsCRUD:
             ORDER BY score DESC
             LIMIT ?
         """
-            LIMIT ?
-        """
+        
         return await self.db.fetch_all(query, (limit,))
 
     async def get_discovery_breakdown(self, guild_id: int = None) -> list[dict]:

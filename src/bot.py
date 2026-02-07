@@ -10,6 +10,8 @@ from pathlib import Path
 import discord
 from discord.ext import commands
 
+from src.utils.logging import get_logger, Category, Event
+
 # Setup logging
 logging.basicConfig(
     level=logging.INFO,
@@ -17,7 +19,7 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 logging.getLogger("aiohttp.access").setLevel(logging.WARNING)
-logger = logging.getLogger("bot")
+log = get_logger("bot")
 
 
 class MusicBot(commands.Bot):
@@ -42,7 +44,7 @@ class MusicBot(commands.Bot):
     
     async def setup_hook(self) -> None:
         """Called when the bot is starting up."""
-        logger.info("Setting up bot...")
+        log.event(Category.SYSTEM, "setup_started")
         
         # Store start time for uptime tracking
         from datetime import datetime, UTC
@@ -54,7 +56,7 @@ class MusicBot(commands.Bot):
         from src.database.crud import SongCRUD, UserCRUD, GuildCRUD, PlaybackCRUD, PreferenceCRUD, ReactionCRUD
         
         self.db = await DatabaseManager.create(config.DATABASE_PATH)
-        logger.info(f"Database initialized at {config.DATABASE_PATH}")
+        log.event(Category.DATABASE, "initialized", path=config.DATABASE_PATH)
         
         # Initialize services
         from src.services.youtube import YouTubeService
@@ -88,7 +90,7 @@ class MusicBot(commands.Bot):
         # Initialize preference manager
         self.preferences = PreferenceManager(pref_crud, song_crud, user_crud)
         
-        logger.info("Services initialized")
+        log.event(Category.SYSTEM, "services_initialized")
         
         # Load all cogs from the cogs directory
         cogs_dir = Path(__file__).parent / "cogs"
@@ -99,19 +101,18 @@ class MusicBot(commands.Bot):
                 cog_name = f"src.cogs.{cog_file.stem}"
                 try:
                     await self.load_extension(cog_name)
-                    logger.info(f"Loaded cog: {cog_name}")
+                    log.event(Category.SYSTEM, Event.COG_LOADED, cog=cog_name)
                 except Exception as e:
-                    logger.error(f"Failed to load cog {cog_name}: {e}")
+                    log.event(Category.SYSTEM, "cog_load_failed", level=logging.ERROR, cog=cog_name, error=str(e))
         
         # Sync slash commands
-        logger.info("Syncing slash commands...")
+        log.event(Category.SYSTEM, "commands_syncing")
         await self.tree.sync()
-        logger.info("Slash commands synced")
+        log.event(Category.SYSTEM, "commands_synced")
     
     async def on_ready(self) -> None:
         """Called when the bot is fully ready."""
-        logger.info(f"Logged in as {self.user} (ID: {self.user.id})")
-        logger.info(f"Connected to {len(self.guilds)} guild(s)")
+        log.event(Category.SYSTEM, Event.BOT_READY, user=str(self.user), user_id=self.user.id, guilds=len(self.guilds))
         
         # Set presence
         activity = discord.Activity(
@@ -122,7 +123,7 @@ class MusicBot(commands.Bot):
     
     async def on_guild_join(self, guild: discord.Guild) -> None:
         """Called when the bot joins a new guild."""
-        logger.info(f"Joined guild: {guild.name} (ID: {guild.id})")
+        log.event(Category.SYSTEM, Event.GUILD_JOINED, guild=guild.name, guild_id=guild.id)
         
         # Check max servers limit
         if self.db:
@@ -134,7 +135,7 @@ class MusicBot(commands.Bot):
                 try:
                     limit_int = int(limit)
                     if len(self.guilds) > limit_int:
-                        logger.warning(f"Server limit ({limit_int}) exceeded. Leaving {guild.name}.")
+                        log.event(Category.SYSTEM, "server_limit_exceeded", level=logging.WARNING, limit=limit_int, guild=guild.name)
                         await guild.leave()
                         await crud.add_notification(
                             "warning", 
@@ -145,11 +146,11 @@ class MusicBot(commands.Bot):
     
     async def on_guild_remove(self, guild: discord.Guild) -> None:
         """Called when the bot is removed from a guild."""
-        logger.info(f"Left guild: {guild.name} (ID: {guild.id})")
+        log.event(Category.SYSTEM, Event.GUILD_LEFT, guild=guild.name, guild_id=guild.id)
     
     async def close(self) -> None:
         """Cleanup when the bot is shutting down."""
-        logger.info("Shutting down...")
+        log.event(Category.SYSTEM, "shutdown_started")
         
         # Disconnect from all voice channels
         for vc in self.voice_clients:
@@ -171,7 +172,7 @@ async def main():
     loop = asyncio.get_event_loop()
     
     def signal_handler():
-        logger.info("Received shutdown signal")
+        log.event(Category.SYSTEM, "shutdown_signal")
         asyncio.create_task(bot.close())
     
     for sig in (signal.SIGINT, signal.SIGTERM):
@@ -184,7 +185,7 @@ async def main():
     try:
         await bot.start(config.DISCORD_TOKEN)
     except KeyboardInterrupt:
-        logger.info("Keyboard interrupt received")
+        log.event(Category.SYSTEM, "keyboard_interrupt")
     finally:
         if not bot.is_closed():
             await bot.close()

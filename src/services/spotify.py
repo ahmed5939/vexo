@@ -9,7 +9,9 @@ from functools import partial
 import spotipy
 from spotipy.oauth2 import SpotifyClientCredentials
 
-logger = logging.getLogger(__name__)
+from src.utils.logging import get_logger, Category, Event
+
+log = get_logger(__name__)
 
 
 @dataclass
@@ -70,7 +72,7 @@ class SpotifyService:
                 popularity=track["popularity"],
             )
         except Exception as e:
-            logger.error(f"Spotify search error: {e}")
+            log.event(Category.API, Event.SEARCH_FAILED, level=logging.ERROR, service="spotify", error=str(e))
             return None
 
     async def search_artist(self, query: str) -> SpotifyArtist | None:
@@ -93,7 +95,7 @@ class SpotifyService:
                 popularity=artist.get("popularity", 0),
             )
         except Exception as e:
-            logger.error(f"Spotify artist search error: {e}")
+            log.error_cat(Category.API, "Spotify artist search error", error=str(e))
             return None
     
     async def get_artist(self, artist_id: str) -> SpotifyArtist | None:
@@ -111,7 +113,7 @@ class SpotifyService:
                 popularity=artist.get("popularity", 0),
             )
         except Exception as e:
-            logger.error(f"Error getting artist {artist_id}: {e}")
+            log.error_cat(Category.API, "Error getting artist", artist_id=artist_id, error=str(e))
             return None
     
     async def get_artists_batch(self, artist_ids: list[str]) -> list[SpotifyArtist]:
@@ -139,7 +141,7 @@ class SpotifyService:
                             popularity=a.get("popularity", 0),
                         ))
             except Exception as e:
-                logger.error(f"Error getting artist batch: {e}")
+                log.error_cat(Category.API, "Error getting artist batch", error=str(e))
         
         return artists
     
@@ -166,7 +168,7 @@ class SpotifyService:
                 ))
             return tracks
         except Exception as e:
-            logger.error(f"Error getting top tracks: {e}")
+            log.error_cat(Category.API, "Error getting top tracks", error=str(e))
             return []
     
     async def get_related_artists(self, artist_id: str) -> list[SpotifyArtist]:
@@ -187,7 +189,7 @@ class SpotifyService:
                 for a in results["artists"]
             ]
         except Exception as e:
-            logger.error(f"Error getting related artists: {e}")
+            log.error_cat(Category.API, "Error getting related artists", error=str(e))
             return []
     
     async def get_playlist_tracks(self, playlist_url: str) -> list[SpotifyTrack]:
@@ -236,7 +238,7 @@ class SpotifyService:
             
             return tracks
         except Exception as e:
-            logger.error(f"Error getting playlist: {e}")
+            log.error_cat(Category.API, "Error getting playlist", error=str(e))
             return []
     
     def _extract_playlist_id(self, url_or_id: str) -> str | None:

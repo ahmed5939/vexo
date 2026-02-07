@@ -13,8 +13,9 @@ from discord.ext import commands
 
 from src.services.youtube import YouTubeService, YTTrack
 from src.database.crud import SongCRUD, UserCRUD, PlaybackCRUD, ReactionCRUD, GuildCRUD
+from src.utils.logging import get_logger, Category, Event
 
-logger = logging.getLogger(__name__)
+log = get_logger(__name__)
 
 
 @dataclass
@@ -132,7 +133,7 @@ class NowPlayingView(discord.ui.View):
                     lib_crud = LibraryCRUD(self.cog.bot.db)
                     await lib_crud.add_to_library(interaction.user.id, player.current.song_db_id, "like")
                 except Exception as e:
-                    logger.error(f"Failed to log like: {e}")
+                    log.error_cat(Category.USER, "Failed to log like", error=str(e))
             
             await interaction.response.send_message(
                 f"❤️ Liked **{player.current.title}**!",
@@ -156,7 +157,7 @@ class NowPlayingView(discord.ui.View):
 
                     await reaction_crud.add_reaction(interaction.user.id, player.current.song_db_id, "dislike")
                 except Exception as e:
-                    logger.error(f"Failed to log dislike: {e}")
+                    log.error_cat(Category.USER, "Failed to log dislike", error=str(e))
             
             await interaction.response.send_message(
                 f"👎 Disliked **{player.current.title}**",
@@ -184,7 +185,7 @@ class MusicCog(commands.Cog):
     async def cog_load(self):
         """Called when the cog is loaded."""
         self._idle_check_task = asyncio.create_task(self._idle_check_loop())
-        logger.info("Music cog loaded")
+        log.event(Category.SYSTEM, Event.COG_LOADED, cog="music")
     
     async def cog_unload(self):
         """Called when the cog is unloaded."""
@@ -196,7 +197,7 @@ class MusicCog(commands.Cog):
             if player.voice_client:
                 await player.voice_client.disconnect(force=True)
         
-        logger.info("Music cog unloaded")
+        log.event(Category.SYSTEM, Event.COG_UNLOADED, cog="music")
     
     def get_player(self, guild_id: int) -> GuildPlayer:
         """Get or create a player for a guild."""
@@ -226,7 +227,7 @@ class MusicCog(commands.Cog):
         if not player.voice_client or not player.voice_client.is_connected():
             try:
                 player.voice_client = await voice_channel.connect(self_deaf=True, timeout=20.0)
-                logger.info(f"Connected to {voice_channel.name} in {interaction.guild.name}")
+                log.event(Category.VOICE, Event.VOICE_CONNECTED, channel=voice_channel.name, guild=interaction.guild.name)
             except Exception as e:
                 await interaction.followup.send(f"❌ Failed to connect: {e}", ephemeral=True)
                 return
@@ -259,7 +260,7 @@ class MusicCog(commands.Cog):
                 except (ValueError, TypeError):
                     pass
                     
-        logger.info(f"Selected track: {track.title}")
+        log.event(Category.QUEUE, Event.TRACK_QUEUED, title=track.title, artist=track.artist)
         
         # Database persistence
         song_db_id = None
@@ -287,7 +288,7 @@ class MusicCog(commands.Cog):
                 lib_crud = LibraryCRUD(self.bot.db)
                 await lib_crud.add_to_library(interaction.user.id, song_db_id, "request")
             except Exception as e:
-                logger.error(f"Failed to persist song/user data: {e}")
+                log.error_cat(Category.DATABASE, "Failed to persist song/user data", error=str(e))
 
         # Add to queue
         item = QueueItem(
@@ -448,10 +449,10 @@ class MusicCog(commands.Cog):
             await interaction.response.defer(ephemeral=True)
         except discord.NotFound:
             # Interaction might have expired or been acknowledged already, just log and continue if possible or return
-            logger.warning("Interaction expired (404) in play_any")
+            log.warning_cat(Category.SYSTEM, "Interaction expired (404) in play_any")
             return
         except Exception as e:
-            logger.error(f"Failed to defer interaction: {e}")
+            log.error_cat(Category.SYSTEM, "Failed to defer interaction", error=str(e))
             return
         
         if not interaction.user.voice:
@@ -639,12 +640,12 @@ class MusicCog(commands.Cog):
                                     break
                                 
                                 if max_seconds > 0 and item.duration_seconds and item.duration_seconds > max_seconds:
-                                    logger.info(f"Skipping discovered song {item.title} (duration {item.duration_seconds}s > {max_seconds}s)")
+                                    log.event(Category.DISCOVERY, "song_skipped_duration", title=item.title, duration=item.duration_seconds, max_duration=max_seconds)
                                     continue
                                 break
                             
                             if not item:
-                                logger.info(f"No discovery songs available for guild {player.guild_id}")
+                                log.event(Category.DISCOVERY, Event.DISCOVERY_FAILED, guild_id=player.guild_id, reason="no_songs_available")
                                 break
                         else:
                             break
@@ -732,7 +733,7 @@ class MusicCog(commands.Cog):
                                             duration_seconds=item.duration_seconds
                                         )
                             except Exception as e:
-                                logger.debug(f"Spotify enrichment failed: {e}")
+                                log.debug_cat(Category.API, "Spotify enrichment failed", error=str(e))
                         
                         # Fallback: Populate from DB if Spotify failed or was unavailable
                         if (not item.year or not item.genre) and item.song_db_id:
@@ -773,12 +774,12 @@ class MusicCog(commands.Cog):
                                  lib_crud = LibraryCRUD(self.bot.db)
                                  await lib_crud.add_to_library(target_user_id, item.song_db_id, "request")
                     except Exception as e:
-                        logger.error(f"Failed to log playback start: {e}")
+                        log.error_cat(Category.DATABASE, "Failed to log playback start", error=str(e))
                 
                 # Get stream URL
                 url = await self.youtube.get_stream_url(item.video_id)
                 if not url:
-                    logger.error(f"Failed to get stream URL for {item.video_id}")
+                    log.event(Category.PLAYBACK, Event.PLAYBACK_ERROR, level=logging.ERROR, video_id=item.video_id, reason="stream_url_failed")
                     continue
                 
                 item.url = url
@@ -795,15 +796,17 @@ class MusicCog(commands.Cog):
                     
                     def after_play(error):
                         if error:
-                            logger.error(f"Playback error: {error}")
+                            log.event(Category.PLAYBACK, Event.PLAYBACK_ERROR, level=logging.ERROR, error=str(error))
                         play_complete.set()
                     
                     player.voice_client.play(source, after=after_play)
                     
-                    # Detailed log entry
-                    log_user = f"User:{item.for_user_id}" if item.for_user_id else f"Requester:{item.requester_id}"
-                    log_source = f"{item.discovery_source} ({item.discovery_reason})" if item.discovery_reason else item.discovery_source
-                    logger.info(f"Playing: {item.title} | {item.artist} | {item.genre or 'Unknown Genre'} | {log_user} | {log_source}")
+                    log.event(
+                        Category.PLAYBACK, Event.TRACK_STARTED,
+                        title=item.title, artist=item.artist, genre=item.genre or "Unknown",
+                        user_id=item.for_user_id or item.requester_id,
+                        source=item.discovery_source, reason=item.discovery_reason
+                    )
                     
                     # Send Now Playing embed
                     await self._send_now_playing(player)
@@ -830,10 +833,10 @@ class MusicCog(commands.Cog):
                                  
                              await playback_crud.mark_completed(item.history_id, completed)
                          except Exception as e:
-                             logger.error(f"Failed to log playback end: {e}")
+                             log.error_cat(Category.DATABASE, "Failed to log playback end", error=str(e))
                     
                 except Exception as e:
-                    logger.error(f"Error playing {item.title}: {e}")
+                    log.event(Category.PLAYBACK, Event.PLAYBACK_ERROR, level=logging.ERROR, title=item.title, error=str(e))
                     continue
                 
                 player.current = None
@@ -885,12 +888,12 @@ class MusicCog(commands.Cog):
                         year=discovered.year,
                     )
             except Exception as e:
-                logger.error(f"Discovery engine error: {e}")
+                log.event(Category.DISCOVERY, Event.DISCOVERY_FAILED, level=logging.ERROR, error=str(e))
         else:
-            logger.warning("Discovery engine not initialized")
+            log.warning_cat(Category.DISCOVERY, "Discovery engine not initialized")
         
         # Fallback: Get random track from charts
-        logger.info(f"Discovery failed or returned None for guild {player.guild_id}. Falling back to charts.")
+        log.event(Category.DISCOVERY, "fallback_to_charts", guild_id=player.guild_id)
         return await self._get_chart_fallback()
     
     async def _get_chart_fallback(self) -> QueueItem | None:
@@ -900,14 +903,14 @@ class MusicCog(commands.Cog):
         region = random.choice(["US", "UK"])
         query = f"Top 100 Songs {region} 2024"
         
-        logger.info(f"Searching for chart playlist: {query}")
+        log.event(Category.DISCOVERY, Event.SEARCH_STARTED, query=query, type="chart_playlist")
         
         # Try to find a chart playlist
         playlists = await self.youtube.search_playlists(query, limit=3)
         
         if playlists:
             playlist = random.choice(playlists)
-            logger.info(f"Found chart playlist: {playlist.get('title', 'Unknown')}")
+            log.event(Category.DISCOVERY, Event.SEARCH_COMPLETED, playlist=playlist.get('title', 'Unknown'))
             
             # Get tracks from playlist
             tracks = await self.youtube.get_playlist_tracks(playlist["browse_id"], limit=50)
@@ -924,12 +927,12 @@ class MusicCog(commands.Cog):
                 )
         
         # Direct search fallback - search for popular songs
-        logger.info("Playlist not found, trying direct search")
+        log.event(Category.DISCOVERY, "fallback_direct_search")
         results = await self.youtube.search("top hits 2024 popular", filter_type="songs", limit=20)
         
         if results:
             track = random.choice(results)
-            logger.info(f"Found fallback track via search: {track.title}")
+            log.event(Category.DISCOVERY, Event.SEARCH_COMPLETED, title=track.title, type="direct_search")
             return QueueItem(
                 video_id=track.video_id,
                 title=track.title,
@@ -940,7 +943,7 @@ class MusicCog(commands.Cog):
                 year=track.year
             )
         
-        logger.warning("Could not find any chart tracks via playlist OR direct search")
+        log.warning_cat(Category.DISCOVERY, "No chart tracks found via any method")
         return None
     
     async def _send_now_playing(self, player: GuildPlayer):
@@ -1010,7 +1013,7 @@ class MusicCog(commands.Cog):
                         if stats["disliked_by"]:
                             embed.add_field(name="👎 Disliked By", value=stats["disliked_by"], inline=False)
                 except Exception as e:
-                    logger.debug(f"Failed to fetch interaction stats for embed: {e}")
+                    log.debug_cat(Category.DATABASE, "Failed to fetch interaction stats for embed", error=str(e))
 
             embed.add_field(name="📜 Queue", value=f"{player.queue.qsize()} songs", inline=True)
             yt_url = f"https://youtube.com/watch?v={item.video_id}"
@@ -1021,7 +1024,7 @@ class MusicCog(commands.Cog):
             
             player.last_np_msg = await channel.send(embed=embed, view=view)
         except Exception as e:
-            logger.debug(f"Failed to send Now Playing embed: {e}")
+            log.debug_cat(Category.SYSTEM, "Failed to send Now Playing embed", error=str(e))
     
     async def _pre_buffer_next(self, player: GuildPlayer):
         """Pre-buffer the next song's URL."""
@@ -1036,9 +1039,9 @@ class MusicCog(commands.Cog):
                 if url:
                     next_item.url = url
                     player._next_url = url
-                    logger.debug(f"Pre-buffered URL for: {next_item.title}")
+                    log.debug_cat(Category.QUEUE, "Pre-buffered URL", title=next_item.title)
         except Exception as e:
-            logger.debug(f"Pre-buffer failed: {e}")
+            log.debug_cat(Category.QUEUE, "Pre-buffer failed", error=str(e))
     
     async def _idle_check_loop(self):
         """Check for idle players and disconnect."""
@@ -1050,7 +1053,7 @@ class MusicCog(commands.Cog):
                 if player.voice_client and player.voice_client.is_connected():
                     # Check if idle for too long
                     if not player.is_playing and (now - player.last_activity).seconds > self.IDLE_TIMEOUT:
-                        logger.info(f"Disconnecting from {guild_id} due to inactivity")
+                        log.event(Category.VOICE, Event.VOICE_DISCONNECTED, guild_id=guild_id, reason="idle_timeout")
                         await player.voice_client.disconnect()
                         player.voice_client = None
     
@@ -1080,7 +1083,7 @@ class MusicCog(commands.Cog):
                     player.voice_client.stop()
                 await player.voice_client.disconnect()
                 player.voice_client = None
-                logger.info(f"Disconnected from {member.guild.name} - everyone left")
+                log.event(Category.VOICE, Event.VOICE_DISCONNECTED, guild=member.guild.name, reason="everyone_left")
 
 
 async def setup(bot: commands.Bot):

@@ -8,8 +8,9 @@ from discord import app_commands
 from discord.ext import commands
 
 from src.services.preferences import PreferenceManager, SongInfo
+from src.utils.logging import get_logger, Category, Event
 
-logger = logging.getLogger(__name__)
+log = get_logger(__name__)
 
 
 class PreferencesCog(commands.Cog):

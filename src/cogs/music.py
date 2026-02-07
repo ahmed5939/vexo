@@ -799,7 +799,11 @@ class MusicCog(commands.Cog):
                         play_complete.set()
                     
                     player.voice_client.play(source, after=after_play)
-                    logger.info(f"Playing: {item.title} - {item.artist}")
+                    
+                    # Detailed log entry
+                    log_user = f"User:{item.for_user_id}" if item.for_user_id else f"Requester:{item.requester_id}"
+                    log_source = f"{item.discovery_source} ({item.discovery_reason})" if item.discovery_reason else item.discovery_source
+                    logger.info(f"Playing: {item.title} | {item.artist} | {item.genre or 'Unknown Genre'} | {log_user} | {log_source}")
                     
                     # Send Now Playing embed
                     await self._send_now_playing(player)
@@ -882,9 +886,11 @@ class MusicCog(commands.Cog):
                     )
             except Exception as e:
                 logger.error(f"Discovery engine error: {e}")
+        else:
+            logger.warning("Discovery engine not initialized")
         
         # Fallback: Get random track from charts
-        logger.info("Falling back to chart tracks for discovery")
+        logger.info(f"Discovery failed or returned None for guild {player.guild_id}. Falling back to charts.")
         return await self._get_chart_fallback()
     
     async def _get_chart_fallback(self) -> QueueItem | None:
@@ -923,6 +929,7 @@ class MusicCog(commands.Cog):
         
         if results:
             track = random.choice(results)
+            logger.info(f"Found fallback track via search: {track.title}")
             return QueueItem(
                 video_id=track.video_id,
                 title=track.title,
@@ -933,7 +940,7 @@ class MusicCog(commands.Cog):
                 year=track.year
             )
         
-        logger.warning("Could not find any chart tracks")
+        logger.warning("Could not find any chart tracks via playlist OR direct search")
         return None
     
     async def _send_now_playing(self, player: GuildPlayer):

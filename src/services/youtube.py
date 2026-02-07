@@ -11,7 +11,32 @@ from typing import Any
 import yt_dlp
 from ytmusicapi import YTMusic
 
+import random
+import time
+from functools import wraps
+
 logger = logging.getLogger(__name__)
+
+
+def retry_with_backoff(retries=3, backoff_in_seconds=1):
+    def decorator(func):
+        @wraps(func)
+        async def wrapper(*args, **kwargs):
+            x = 0
+            while True:
+                try:
+                    return await func(*args, **kwargs)
+                except Exception as e:
+                    if x == retries:
+                        logger.error(f"Failed after {retries} retries: {e}")
+                        raise
+                    else:
+                        sleep = (backoff_in_seconds * 2 ** x + random.uniform(0, 1))
+                        logger.warning(f"Retry {x + 1}/{retries} for {func.__name__} after {sleep:.2f}s due to: {e}")
+                        await asyncio.sleep(sleep)
+                        x += 1
+        return wrapper
+    return decorator
 
 
 @dataclass
@@ -45,6 +70,7 @@ class YouTubeService:
         if po_token:
             self._ydl_opts["extractor_args"] = {"youtube": {"po_token": [po_token]}}
     
+    @retry_with_backoff()
     async def search(self, query: str, filter_type: str = "songs", limit: int = 5) -> list[YTTrack]:
         """Search YouTube Music for tracks."""
         loop = asyncio.get_event_loop()
@@ -85,6 +111,7 @@ class YouTubeService:
             logger.error(f"YouTube search error: {e}")
             return []
     
+    @retry_with_backoff()
     async def get_watch_playlist(self, video_id: str, limit: int = 20) -> list[YTTrack]:
         """Get related tracks from a video's watch playlist."""
         loop = asyncio.get_event_loop()
@@ -116,6 +143,7 @@ class YouTubeService:
             logger.error(f"Error getting watch playlist: {e}")
             return []
     
+    @retry_with_backoff()
     async def get_playlist_tracks(self, playlist_id: str, limit: int = 100) -> list[YTTrack]:
         """Get tracks from a YouTube Music playlist."""
         loop = asyncio.get_event_loop()
@@ -162,6 +190,7 @@ class YouTubeService:
             logger.error(f"Error getting stream URL for {video_id}: {e}")
             return None
     
+    @retry_with_backoff()
     async def search_playlists(self, query: str, limit: int = 5) -> list[dict]:
         """Search for playlists."""
         loop = asyncio.get_event_loop()

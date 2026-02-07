@@ -387,6 +387,7 @@ body::before {
     flex-direction: column;
     padding: 1rem 0.75rem;
     overflow-y: auto;
+    z-index: 50;
 }
 
 .sidebar-nav {
@@ -490,6 +491,8 @@ body::before {
     margin-left: var(--sidebar-width);
     padding: 1.5rem;
     min-height: calc(100vh - var(--topbar-height));
+    position: relative;
+    width: 100%;
 }
 
 /* Tab Panels */
@@ -1997,6 +2000,10 @@ body::before {
     .bento-helpful {
         grid-column: span 6;
     }
+
+    .bento-chart {
+        grid-column: span 12;
+    }
 }
 
 @media (max-width: 1024px) {
@@ -2160,6 +2167,7 @@ body::before {
 .text-error {
     color: var(--error);
 }
+
 /* Charts */
 .bento-chart {
     grid-column: span 6;
@@ -2173,10 +2181,4 @@ body::before {
     position: relative;
     min-height: 200px;
     width: 100%;
-}
-
-@media (max-width: 1200px) {
-    .bento-chart {
-        grid-column: span 12;
-    }
 }

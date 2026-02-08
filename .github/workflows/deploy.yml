@@ -7,11 +7,11 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: jamesabrownlee/vexo
+  IMAGE_NAME: axiom3d-yt/vexo-bot
 
 jobs:
   build:
-    runs-on: ubuntu-24.04  # Changed from ubuntu-24.04
+    runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write

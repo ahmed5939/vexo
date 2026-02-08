@@ -187,14 +187,26 @@ class YouTubeService:
             log.error_cat(Category.API, "Error getting playlist", error=str(e))
             return []
     
+    @retry_with_backoff(retries=2, backoff_in_seconds=1)
     async def get_stream_url(self, video_id: str) -> StreamInfo | None:
-        """Get the audio stream URL and HTTP headers for a video using yt-dlp."""
+        """Get the audio stream URL and HTTP headers for a video using yt-dlp.
+        
+        Has retry logic and is designed to not block the event loop indefinitely.
+        """
         loop = asyncio.get_event_loop()
         url = f"https://www.youtube.com/watch?v={video_id}"
 
         try:
             def extract():
-                with yt_dlp.YoutubeDL(self._ydl_opts) as ydl:
+                # Use isolated options to prevent interference
+                opts = {
+                    **self._ydl_opts,
+                    "retries": 2,  # Reduce retry count
+                    "fragment_retries": 2,
+                    "socket_timeout": 15,  # Shorter timeout
+                    "http_chunk_size": 10485760,  # 10MB chunks
+                }
+                with yt_dlp.YoutubeDL(opts) as ydl:
                     info = ydl.extract_info(url, download=False)
                     stream_url = info.get("url")
                     if not stream_url:
@@ -207,7 +219,7 @@ class YouTubeService:
             return await loop.run_in_executor(None, extract)
         except Exception as e:
             log.event(Category.API, Event.API_ERROR, level=logging.ERROR, service="youtube", video_id=video_id, error=str(e))
-            return None
+            raise  # Re-raise to trigger retry
     
     @retry_with_backoff()
     async def search_playlists(self, query: str, limit: int = 5) -> list[dict]:

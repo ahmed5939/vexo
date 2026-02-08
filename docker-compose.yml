@@ -1,8 +1,5 @@
-version: '3.8'
-
 services:
   musicbot:
-    image: ghcr.io/vexo-smart/vexo:latest
     build: .
     container_name: smart-music-bot
     restart: unless-stopped
@@ -10,31 +7,52 @@ services:
       - DISCORD_TOKEN=${DISCORD_TOKEN}
       - SPOTIFY_CLIENT_ID=${SPOTIFY_CLIENT_ID}
       - SPOTIFY_CLIENT_SECRET=${SPOTIFY_CLIENT_SECRET}
-      - DATABASE_PATH=/app/data/musicbot.db
       - WEB_HOST=0.0.0.0
       - WEB_PORT=8080
-      # Optional: YouTube cookies
-      # - YTDL_COOKIES_PATH=/app/data/cookies.txt
-      # - YTDL_PO_TOKEN=${YTDL_PO_TOKEN}
+      - DATABASE_PATH=/app/data/musicbot.db
     volumes:
       - ./data:/app/data
-      # Optional: Mount cookies file
-      # - ./cookies.txt:/app/data/cookies.txt:ro
     ports:
-      # Dashboard accessible on port 6767
-      - "6767:8080"
+      - "6767:8080" # Map container 8080 to host 6767
     healthcheck:
-      test: [ "CMD", "python", "-c", "import socket; s = socket.socket(); s.connect(('localhost', 8080)); s.close()" ]
+      test: [ "CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/api/status').read()" ]
       interval: 30s
       timeout: 10s
       retries: 3
+    networks:
+      - vexo-network
+
+  dashboard:
+    build: ./dashboard
+    container_name: vexo-dashboard
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=production
+      - DATABASE_PATH=/app/data/musicbot.db
+      - BOT_API_URL=http://musicbot:8080 # Internal docker network address
+    volumes:
+      - ./data:/app/data:ro # Mount database read-only
+    ports:
+      - "3000:3000"
+    depends_on:
+      - musicbot
+    healthcheck:
+      test: [ "CMD", "node", "-e", "require('http').get('http://localhost:3000/api/status', (res) => res.statusCode === 200 ? process.exit(0) : process.exit(1))" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - vexo-network
 
   watchtower:
     image: containrrr/watchtower
     container_name: watchtower
-    restart: unless-stopped
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
       - DOCKER_API_VERSION=1.45
     command: --interval 60 --cleanup
+
+networks:
+  vexo-network:
+    driver: bridge

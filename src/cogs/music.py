@@ -2,10 +2,13 @@
 Music Cog - Playback commands and audio streaming
 """
 import asyncio
+import io
 import logging
+import aiohttp
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, UTC
 from typing import Optional
+from urllib.parse import quote_plus
 
 import discord
 from discord import app_commands
@@ -52,6 +55,11 @@ class GuildPlayer:
     _next_url: str | None = None  # Pre-buffered URL
     text_channel_id: int | None = None  # For Now Playing messages
     last_np_msg: discord.Message | None = None
+    start_time: datetime | None = None  # When current song started
+    _next_discovery: QueueItem | None = None  # Prefetched discovery song
+    _prefetch_task: asyncio.Task | None = None  # Background prefetch task
+    _consecutive_failures: int = 0  # Track consecutive failures for auto-recovery
+    _last_health_check: datetime = field(default_factory=lambda: datetime.now(UTC))
 
 
 class NowPlayingView(discord.ui.View):
@@ -173,14 +181,16 @@ class MusicCog(commands.Cog):
     FFMPEG_BEFORE_OPTIONS = (
         "-reconnect 1 -reconnect_streamed 1 "
         "-reconnect_on_network_error 1 -reconnect_on_http_error 403,429,500,502,503 "
-        "-reconnect_delay_max 15 -nostdin"
+        "-reconnect_delay_max 5"
     )
-    FFMPEG_OPTIONS = {
-        "before_options": FFMPEG_BEFORE_OPTIONS,
-        "options": "-vn",
-    }
+    FFMPEG_OPTIONS = "-vn -b:a 128k"
+    
     IDLE_TIMEOUT = 300  # 5 minutes
-
+    STREAM_FETCH_TIMEOUT = 30  # Max seconds to fetch stream URL
+    PLAYBACK_TIMEOUT = 600  # Max seconds for a single song (10 min safety)
+    DISCOVERY_TIMEOUT = 20  # Max seconds for discovery operation
+    MAX_CONSECUTIVE_FAILURES = 3  # Auto-restart playback loop after this many failures
+    
     @staticmethod
     def _build_ffmpeg_options(stream_info: StreamInfo) -> dict:
         """Build FFmpeg options, injecting HTTP headers from yt-dlp when available."""
@@ -631,12 +641,14 @@ class MusicCog(commands.Cog):
     # ==================== PLAYBACK LOOP ====================
     
     async def _play_loop(self, player: GuildPlayer):
-        """Main playback loop for a guild."""
+        """Main playback loop for a guild with self-healing capabilities."""
         player.is_playing = True
+        player._consecutive_failures = 0
         
         try:
             while player.voice_client and player.voice_client.is_connected():
                 player.skip_votes.clear()
+                player._last_health_check = datetime.now(UTC)
                 
                 # Get next item from queue or discovery
                 try:
@@ -653,16 +665,26 @@ class MusicCog(commands.Cog):
                                         max_seconds = int(max_dur) * 60
                                 except: pass
                             
-                            # Try up to 3 times to find a song within duration limit
-                            for _ in range(3):
-                                item = await self._get_discovery_song(player)
-                                if not item:
-                                    break
-                                
-                                if max_seconds > 0 and item.duration_seconds and item.duration_seconds > max_seconds:
-                                    log.event(Category.DISCOVERY, "song_skipped_duration", title=item.title, duration=item.duration_seconds, max_duration=max_seconds)
+                            # Use prefetched discovery song if available
+                            item = None
+                            if player._next_discovery:
+                                item = player._next_discovery
+                                player._next_discovery = None
+                                log.debug_cat(Category.DISCOVERY, "Using prefetched discovery song", title=item.title)
+                            else:
+                                # Try to get discovery song with timeout
+                                try:
+                                    item = await asyncio.wait_for(
+                                        self._get_discovery_song_with_retry(player, max_seconds),
+                                        timeout=self.DISCOVERY_TIMEOUT
+                                    )
+                                except asyncio.TimeoutError:
+                                    log.warning_cat(Category.DISCOVERY, "Discovery timed out", guild_id=player.guild_id)
+                                    player._consecutive_failures += 1
+                                    if player._consecutive_failures >= self.MAX_CONSECUTIVE_FAILURES:
+                                        log.error_cat(Category.DISCOVERY, "Max consecutive failures reached, stopping", guild_id=player.guild_id)
+                                        break
                                     continue
-                                break
                             
                             if not item:
                                 log.event(Category.DISCOVERY, Event.DISCOVERY_FAILED, guild_id=player.guild_id, reason="no_songs_available")
@@ -796,16 +818,34 @@ class MusicCog(commands.Cog):
                     except Exception as e:
                         log.error_cat(Category.DATABASE, "Failed to log playback start", error=str(e))
                 
-                # Get stream URL and HTTP headers
-                stream_info = await self.youtube.get_stream_url(item.video_id)
+                # Get stream URL and HTTP headers with timeout
+                try:
+                    stream_info = await asyncio.wait_for(
+                        self.youtube.get_stream_url(item.video_id),
+                        timeout=self.STREAM_FETCH_TIMEOUT
+                    )
+                except asyncio.TimeoutError:
+                    log.warning_cat(Category.PLAYBACK, "Stream URL fetch timed out", video_id=item.video_id)
+                    player._consecutive_failures += 1
+                    if player._consecutive_failures >= self.MAX_CONSECUTIVE_FAILURES:
+                        log.error_cat(Category.PLAYBACK, "Max consecutive stream failures, pausing", guild_id=player.guild_id)
+                        await asyncio.sleep(5)  # Brief pause before retry
+                        player._consecutive_failures = 0
+                    continue
+                
                 if not stream_info:
                     log.event(Category.PLAYBACK, Event.PLAYBACK_ERROR, level=logging.ERROR, video_id=item.video_id, reason="stream_url_failed")
+                    player._consecutive_failures += 1
                     continue
-
+                
+                # Reset failure counter on successful stream fetch
+                player._consecutive_failures = 0
                 item.url = stream_info.url
 
-                # Pre-buffer next URL if enabled
-                if player.pre_buffer and not player.queue.empty():
+                # Start prefetching next song in background (for discovery mode)
+                if player.autoplay and player.queue.empty():
+                    asyncio.create_task(self._prefetch_discovery_song(player))
+                elif player.pre_buffer and not player.queue.empty():
                     asyncio.create_task(self._pre_buffer_next(player))
 
                 # Play the audio
@@ -818,9 +858,14 @@ class MusicCog(commands.Cog):
                     def after_play(error):
                         if error:
                             log.event(Category.PLAYBACK, Event.PLAYBACK_ERROR, level=logging.ERROR, error=str(error))
-                        play_complete.set()
+                        # Always set event to prevent infinite wait
+                        try:
+                            play_complete.set()
+                        except Exception:
+                            pass
                     
                     player.voice_client.play(source, after=after_play)
+                    player.start_time = datetime.now(UTC)
                     
                     log.event(
                         Category.PLAYBACK, Event.TRACK_STARTED,
@@ -832,8 +877,20 @@ class MusicCog(commands.Cog):
                     # Send Now Playing embed
                     await self._send_now_playing(player)
                     
-                    # Wait for song to finish
-                    await play_complete.wait()
+                    # Wait for song to finish WITH TIMEOUT for self-healing
+                    # Use song duration + buffer, or default safety timeout
+                    max_wait = self.PLAYBACK_TIMEOUT
+                    if item.duration_seconds:
+                        max_wait = item.duration_seconds + 60  # Song duration + 1 min buffer
+                    
+                    try:
+                        await asyncio.wait_for(play_complete.wait(), timeout=max_wait)
+                    except asyncio.TimeoutError:
+                        log.warning_cat(Category.PLAYBACK, "Playback timeout - auto-healing", 
+                                       title=item.title, max_wait=max_wait)
+                        # Force stop the current source to recover
+                        if player.voice_client and player.voice_client.is_playing():
+                            player.voice_client.stop()
                     
                     # Database: Log Playback End
                     if hasattr(self.bot, "db") and self.bot.db and item.history_id:
@@ -921,6 +978,64 @@ class MusicCog(commands.Cog):
         log.event(Category.DISCOVERY, "fallback_to_charts", guild_id=player.guild_id)
         return await self._get_chart_fallback()
     
+    async def _get_discovery_song_with_retry(self, player: GuildPlayer, max_seconds: int = 0) -> QueueItem | None:
+        """Get discovery song with retry logic for duration limits."""
+        for attempt in range(3):
+            item = await self._get_discovery_song(player)
+            if not item:
+                return None
+            
+            if max_seconds > 0 and item.duration_seconds and item.duration_seconds > max_seconds:
+                log.event(Category.DISCOVERY, "song_skipped_duration", 
+                         title=item.title, duration=item.duration_seconds, 
+                         max_duration=max_seconds, attempt=attempt + 1)
+                continue
+            return item
+        return None
+    
+    async def _prefetch_discovery_song(self, player: GuildPlayer):
+        """Prefetch the next discovery song in background to reduce delay."""
+        if player._next_discovery:
+            return  # Already have one prefetched
+        
+        try:
+            # Get max duration setting
+            from src.database.crud import GuildCRUD
+            guild_crud = GuildCRUD(self.bot.db) if hasattr(self.bot, "db") else None
+            max_seconds = 0
+            if guild_crud:
+                try:
+                    max_dur = await guild_crud.get_setting(player.guild_id, "max_song_duration")
+                    if max_dur:
+                        max_seconds = int(max_dur) * 60
+                except: pass
+            
+            # Get discovery song with timeout
+            item = await asyncio.wait_for(
+                self._get_discovery_song_with_retry(player, max_seconds),
+                timeout=self.DISCOVERY_TIMEOUT
+            )
+            
+            if item:
+                # Also prefetch stream URL for zero-delay playback
+                try:
+                    stream_info = await asyncio.wait_for(
+                        self.youtube.get_stream_url(item.video_id),
+                        timeout=self.STREAM_FETCH_TIMEOUT
+                    )
+                    if stream_info:
+                        item.url = stream_info.url
+                        log.debug_cat(Category.DISCOVERY, "Prefetched discovery song with URL", title=item.title)
+                except asyncio.TimeoutError:
+                    log.debug_cat(Category.DISCOVERY, "Prefetch stream URL timed out", title=item.title)
+                
+                player._next_discovery = item
+                
+        except asyncio.TimeoutError:
+            log.debug_cat(Category.DISCOVERY, "Discovery prefetch timed out")
+        except Exception as e:
+            log.debug_cat(Category.DISCOVERY, "Discovery prefetch failed", error=str(e))
+    
     async def _get_chart_fallback(self) -> QueueItem | None:
         """Get a random track from Top 100 US/UK charts as fallback."""
         import random
@@ -972,7 +1087,7 @@ class MusicCog(commands.Cog):
         return None
     
     async def _send_now_playing(self, player: GuildPlayer):
-        """Send Now Playing embed to the text channel."""
+        """Send Now Playing image to the text channel."""
         if not player.current or not player.text_channel_id:
             return
         
@@ -991,65 +1106,110 @@ class MusicCog(commands.Cog):
         try:
             item = player.current
             
-            embed = discord.Embed(
-                title="🎵 Now Playing",
-                color=discord.Color.from_rgb(124, 58, 237)
-            )
+            # 1. Fetch Interaction Stats from DB
+            requested_by_str = ""
+            liked_by_str = ""
+            disliked_by_str = ""
             
-            embed.add_field(name="🎶 Track", value=f"**{item.title}**", inline=True)
-            embed.add_field(name="🎤 Artist", value=item.artist, inline=True)
-            
-            if item.duration_seconds:
-                minutes, seconds = divmod(item.duration_seconds, 60)
-                duration_str = f"{minutes}:{seconds:02d}"
-                embed.add_field(name="⏳ Duration", value=duration_str, inline=True)
-            
-            if item.genre:
-                embed.add_field(name="🏷️ Genre", value=item.genre, inline=True)
-            
-            if item.year:
-                embed.add_field(name="📅 Year", value=str(item.year), inline=True)
-            
-            if item.discovery_reason:
-                embed.add_field(name="✨ Discovery", value=item.discovery_reason, inline=False)
-            
-            if item.for_user_id:
-                embed.add_field(name="🎯 Playing for", value=f"<@{item.for_user_id}>", inline=True)
-            elif item.requester_id:
-                embed.add_field(name="📨 Requested by", value=f"<@{item.requester_id}>", inline=True)
-            
-            embed.set_thumbnail(url=f"https://img.youtube.com/vi/{item.video_id}/hqdefault.jpg")
-            
-            # Add Interaction Stats (Who requested, liked, disliked)
             if hasattr(self.bot, "db") and item.song_db_id:
                 try:
                     stats = await self.bot.db.fetch_one("""
                         SELECT 
                             (SELECT GROUP_CONCAT(DISTINCT u.username) FROM playback_history ph JOIN users u ON ph.for_user_id = u.id WHERE ph.song_id = ? AND ph.discovery_source = "user_request") as requested_by,
-                            (SELECT GROUP_CONCAT(DISTINCT u.username) FROM song_reactions sr JOIN users u ON sr.song_id = ? AND sr.reaction = 'like') as liked_by,
-                            (SELECT GROUP_CONCAT(DISTINCT u.username) FROM song_reactions sr JOIN users u ON sr.user_id = u.id WHERE sr.song_id = ? AND sr.reaction = 'dislike') as disliked_by
+                            (SELECT GROUP_CONCAT(DISTINCT u.username) FROM song_reactions sr JOIN users u ON sr.song_id = ? AND sr.user_id = u.id AND sr.reaction = 'like') as liked_by,
+                            (SELECT GROUP_CONCAT(DISTINCT u.username) FROM song_reactions sr JOIN users u ON sr.song_id = ? AND sr.user_id = u.id AND sr.reaction = 'dislike') as disliked_by
                     """, (item.song_db_id, item.song_db_id, item.song_db_id))
                     
                     if stats:
-                        if stats["requested_by"]:
-                            embed.add_field(name="📨 Requested By", value=stats["requested_by"], inline=False)
-                        if stats["liked_by"]:
-                            embed.add_field(name="❤️ Liked By", value=stats["liked_by"], inline=False)
-                        if stats["disliked_by"]:
-                            embed.add_field(name="👎 Disliked By", value=stats["disliked_by"], inline=False)
+                        requested_by_str = stats["requested_by"] or ""
+                        liked_by_str = stats["liked_by"] or ""
+                        disliked_by_str = stats["disliked_by"] or ""
+                        
+                        # If requestedBy is empty, it might be discovery, so use the requester from QueueItem if available
+                        if not requested_by_str and item.requester_id:
+                             user = self.bot.get_user(item.requester_id)
+                             if user: requested_by_str = user.display_name
                 except Exception as e:
-                    log.debug_cat(Category.DATABASE, "Failed to fetch interaction stats for embed", error=str(e))
+                    log.debug(f"Failed to fetch NP stats: {e}")
 
-            embed.add_field(name="📜 Queue", value=f"{player.queue.qsize()} songs", inline=True)
-            yt_url = f"https://youtube.com/watch?v={item.video_id}"
-            embed.add_field(name="🔗 Link", value=f"[YouTube]({yt_url})", inline=True)
+            # 2. Calculate progress
+            current_time_str = "0:00"
+            progress_percent = 0
+            if player.start_time:
+                elapsed = (datetime.now(UTC) - player.start_time).total_seconds()
+                minutes, seconds = divmod(int(elapsed), 60)
+                current_time_str = f"{minutes}:{seconds:02d}"
+                if item.duration_seconds:
+                    progress_percent = min(100, int((elapsed / item.duration_seconds) * 100))
+
+            total_time_str = "0:00"
+            if item.duration_seconds:
+                minutes, seconds = divmod(item.duration_seconds, 60)
+                total_time_str = f"{minutes}:{seconds:02d}"
+
+            # 3. Build image URL
+            base_url = "http://dashboard:3000" 
             
-            # Create view with buttons
+            # Get person being played for
+            for_user_str = ""
+            target_user_id = item.for_user_id or item.requester_id
+            if target_user_id:
+                # Try guild cache first as it's most reliable for display names
+                user = player.voice_client.guild.get_member(target_user_id) if player.voice_client else None
+                if not user:
+                    user = self.bot.get_user(target_user_id)
+                
+                if user:
+                    for_user_str = user.display_name
+                else:
+                    for_user_str = "Someone"
+            
+            params = {
+                "title": item.title,
+                "artist": item.artist,
+                "thumbnail": f"https://img.youtube.com/vi/{item.video_id}/hqdefault.jpg",
+                "genre": item.genre or "",
+                "year": str(item.year) if item.year else "",
+                "progress": str(progress_percent),
+                "duration": total_time_str,
+                "current": current_time_str,
+                "requestedBy": requested_by_str,
+                "likedBy": liked_by_str,
+                "dislikedBy": disliked_by_str,
+                "queueSize": str(player.queue.qsize()),
+                "discoveryReason": item.discovery_reason or "",
+                "forUser": for_user_str,
+                "videoUrl": f"https://youtube.com/watch?v={item.video_id}"
+            }
+            
+            query_str = "&".join([f"{k}={quote_plus(v)}" for k, v in params.items()])
+            image_url = f"{base_url}/api/now-playing/image?{query_str}"
+            
+            log.debug(f"Fetching NP image: {image_url}")
+
+            async with aiohttp.ClientSession() as session:
+                try:
+                    async with session.get(image_url, timeout=5) as resp:
+                        if resp.status == 200:
+                            image_data = await resp.read()
+                            file = discord.File(io.BytesIO(image_data), filename="nowplaying.png")
+                            
+                            view = NowPlayingView(self, player.guild_id)
+                            # Send direct image with view (no embed as requested)
+                            player.last_np_msg = await channel.send(file=file, view=view)
+                            return
+                        else:
+                            log.warning(f"Failed to fetch NP image: HTTP {resp.status}")
+                except Exception as e:
+                    log.warning(f"Error fetching NP image: {e}")
+
+            # Fallback to simple embed if image fails
+            embed = discord.Embed(title="🎵 Now Playing", description=f"**{item.title}**\n{item.artist}", color=0x7c3aed)
             view = NowPlayingView(self, player.guild_id)
-            
             player.last_np_msg = await channel.send(embed=embed, view=view)
+
         except Exception as e:
-            log.debug_cat(Category.SYSTEM, "Failed to send Now Playing embed", error=str(e))
+            log.error_cat(Category.SYSTEM, "Failed to send Now Playing msg", error=str(e))
     
     async def _pre_buffer_next(self, player: GuildPlayer):
         """Pre-buffer the next song's URL."""
@@ -1069,7 +1229,9 @@ class MusicCog(commands.Cog):
             log.debug_cat(Category.QUEUE, "Pre-buffer failed", error=str(e))
     
     async def _idle_check_loop(self):
-        """Check for idle players and disconnect."""
+        """Check for idle players, stuck players, and disconnect when needed."""
+        STUCK_THRESHOLD = 1800  # 30 minutes without health check update = stuck
+        
         while True:
             await asyncio.sleep(60)  # Check every minute
             
@@ -1081,6 +1243,31 @@ class MusicCog(commands.Cog):
                         log.event(Category.VOICE, Event.VOICE_DISCONNECTED, guild_id=guild_id, reason="idle_timeout")
                         await player.voice_client.disconnect()
                         player.voice_client = None
+                        continue
+                    
+                    # Check if player is stuck (playing but no health check update)
+                    if player.is_playing and hasattr(player, '_last_health_check'):
+                        time_since_health = (now - player._last_health_check).total_seconds()
+                        if time_since_health > STUCK_THRESHOLD:
+                            log.warning_cat(Category.PLAYBACK, "Stuck player detected - auto-restarting", 
+                                          guild_id=guild_id, stuck_seconds=time_since_health)
+                            
+                            # Try to stop current playback
+                            try:
+                                if player.voice_client.is_playing():
+                                    player.voice_client.stop()
+                            except Exception:
+                                pass
+                            
+                            # Reset state and restart play loop
+                            player.is_playing = False
+                            player._consecutive_failures = 0
+                            player.current = None
+                            
+                            # Restart play loop if autoplay is on
+                            if player.autoplay:
+                                asyncio.create_task(self._play_loop(player))
+                                log.event(Category.PLAYBACK, "play_loop_restarted", guild_id=guild_id)
     
     # ==================== EVENTS ====================
     

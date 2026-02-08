@@ -4,6 +4,7 @@ Music Cog - Playback commands and audio streaming
 import asyncio
 import io
 import logging
+import time
 import aiohttp
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, UTC
@@ -60,6 +61,7 @@ class GuildPlayer:
     _prefetch_task: asyncio.Task | None = None  # Background prefetch task
     _consecutive_failures: int = 0  # Track consecutive failures for auto-recovery
     _last_health_check: datetime = field(default_factory=lambda: datetime.now(UTC))
+    _np_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
 class NowPlayingView(discord.ui.View):
@@ -190,6 +192,7 @@ class MusicCog(commands.Cog):
     PLAYBACK_TIMEOUT = 600  # Max seconds for a single song (10 min safety)
     DISCOVERY_TIMEOUT = 20  # Max seconds for discovery operation
     MAX_CONSECUTIVE_FAILURES = 3  # Auto-restart playback loop after this many failures
+    SPOTIFY_ENRICH_TIMEOUT = 6  # Seconds; runs in background to avoid delaying playback
     
     @staticmethod
     def _build_ffmpeg_options(stream_info: StreamInfo) -> dict:
@@ -480,10 +483,10 @@ class MusicCog(commands.Cog):
         except discord.NotFound:
             # Interaction might have expired or been acknowledged already, just log and continue if possible or return
             log.warning_cat(Category.SYSTEM, "Interaction expired (404) in play_any")
-            return
+            return await interaction.followup.send("error: interaction expired", ephemeral=True)
         except Exception as e:
             log.error_cat(Category.SYSTEM, "Failed to defer interaction", error=str(e))
-            return
+            return await interaction.followup.send("error: failed to defer interaction", ephemeral=True)
         
         if not interaction.user.voice:
             await interaction.followup.send("❌ You need to be in a voice channel!", ephemeral=True)
@@ -649,6 +652,15 @@ class MusicCog(commands.Cog):
             while player.voice_client and player.voice_client.is_connected():
                 player.skip_votes.clear()
                 player._last_health_check = datetime.now(UTC)
+                iteration_t0 = time.perf_counter()
+                log.info_cat(
+                    Category.PLAYBACK,
+                    "play_loop_iteration_start",
+                    guild_id=player.guild_id,
+                    queue_size=player.queue.qsize(),
+                    autoplay=player.autoplay,
+                    pre_buffer=player.pre_buffer,
+                )
                 
                 # Get next item from queue or discovery
                 try:
@@ -660,7 +672,16 @@ class MusicCog(commands.Cog):
                             max_seconds = 0
                             if guild_crud:
                                 try:
+                                    setting_t0 = time.perf_counter()
                                     max_dur = await guild_crud.get_setting(player.guild_id, "max_song_duration")
+                                    log.info_cat(
+                                        Category.DATABASE,
+                                        "guild_setting_fetched",
+                                        guild_id=player.guild_id,
+                                        setting="max_song_duration",
+                                        value=max_dur,
+                                        ms=int((time.perf_counter() - setting_t0) * 1000),
+                                    )
                                     if max_dur:
                                         max_seconds = int(max_dur) * 60
                                 except: pass
@@ -674,9 +695,24 @@ class MusicCog(commands.Cog):
                             else:
                                 # Try to get discovery song with timeout
                                 try:
+                                    discovery_t0 = time.perf_counter()
+                                    log.info_cat(
+                                        Category.DISCOVERY,
+                                        "discovery_fetch_start",
+                                        guild_id=player.guild_id,
+                                        max_seconds=max_seconds,
+                                        timeout_s=self.DISCOVERY_TIMEOUT,
+                                    )
                                     item = await asyncio.wait_for(
                                         self._get_discovery_song_with_retry(player, max_seconds),
                                         timeout=self.DISCOVERY_TIMEOUT
+                                    )
+                                    log.info_cat(
+                                        Category.DISCOVERY,
+                                        "discovery_fetch_end",
+                                        guild_id=player.guild_id,
+                                        found=bool(item),
+                                        ms=int((time.perf_counter() - discovery_t0) * 1000),
                                     )
                                 except asyncio.TimeoutError:
                                     log.warning_cat(Category.DISCOVERY, "Discovery timed out", guild_id=player.guild_id)
@@ -692,16 +728,38 @@ class MusicCog(commands.Cog):
                         else:
                             break
                     else:
+                        queue_t0 = time.perf_counter()
                         item = player.queue.get_nowait()
+                        log.info_cat(
+                            Category.QUEUE,
+                            "queue_item_dequeued",
+                            guild_id=player.guild_id,
+                            video_id=getattr(item, "video_id", None),
+                            ms=int((time.perf_counter() - queue_t0) * 1000),
+                            queue_size=player.queue.qsize(),
+                        )
                 except asyncio.QueueEmpty:
                     break
                 
                 player.current = item
                 player.last_activity = datetime.now(UTC)
+
+                log.info_cat(
+                    Category.PLAYBACK,
+                    "track_selected",
+                    guild_id=player.guild_id,
+                    video_id=item.video_id,
+                    title=item.title,
+                    artist=item.artist,
+                    source=item.discovery_source,
+                    queue_size=player.queue.qsize(),
+                    ms_since_iteration_start=int((time.perf_counter() - iteration_t0) * 1000),
+                )
                 
                 # Database: Ensure session and log playback
                 history_id = None
                 if hasattr(self.bot, "db") and self.bot.db:
+                    db_t0 = time.perf_counter()
                     try:
                         playback_crud = PlaybackCRUD(self.bot.db)
                         song_crud = SongCRUD(self.bot.db)
@@ -742,40 +800,8 @@ class MusicCog(commands.Cog):
                             # If it was ephemeral and now requested by user, make it permanent
                             if not is_ephemeral and song.get("is_ephemeral"):
                                 await song_crud.make_permanent(song["id"])
-                        
-                        # Metadata Enrichment Logic (Prioritizing Spotify for accuracy)
-                        spotify = getattr(self.bot, "spotify", None)
-                        if spotify:
-                            try:
-                                # Always attempt Spotify lookup for better Genre/Year quality
-                                query = f"{item.artist} {item.title}"
-                                sp_track = await spotify.search_track(query)
-                                if sp_track:
-                                    # Spotify is the source of truth for year and genre
-                                    item.year = sp_track.release_year
-                                    
-                                    # Get precise genres from Spotify Artist
-                                    artist = await spotify.get_artist(sp_track.artist_id)
-                                    if artist and artist.genres:
-                                        # Use primary genre
-                                        item.genre = artist.genres[0].title()
-                                        
-                                        # Clear old/wrong genres and save confirmed one to DB
-                                        if item.song_db_id:
-                                            await song_crud.clear_genres(item.song_db_id)
-                                            await song_crud.add_genre(item.song_db_id, item.genre)
-                                    
-                                    # Sync back to main song table
-                                    if item.song_db_id:
-                                        await song_crud.get_or_create_by_yt_id(
-                                            canonical_yt_id=item.video_id,
-                                            title=item.title,
-                                            artist_name=item.artist,
-                                            release_year=item.year,
-                                            duration_seconds=item.duration_seconds
-                                        )
-                            except Exception as e:
-                                log.debug_cat(Category.API, "Spotify enrichment failed", error=str(e))
+
+                        # Metadata enrichment (Spotify) intentionally runs in the background after playback starts.
                         
                         # Fallback: Populate from DB if Spotify failed or was unavailable
                         if (not item.year or not item.genre) and item.song_db_id:
@@ -817,12 +843,38 @@ class MusicCog(commands.Cog):
                                  await lib_crud.add_to_library(target_user_id, item.song_db_id, "request")
                     except Exception as e:
                         log.error_cat(Category.DATABASE, "Failed to log playback start", error=str(e))
+                    finally:
+                        log.info_cat(
+                            Category.DATABASE,
+                            "db_playback_start_block_end",
+                            guild_id=player.guild_id,
+                            video_id=item.video_id,
+                            song_db_id=item.song_db_id,
+                            history_id=getattr(item, "history_id", None),
+                            ms=int((time.perf_counter() - db_t0) * 1000),
+                        )
                 
                 # Get stream URL and HTTP headers with timeout
                 try:
+                    stream_t0 = time.perf_counter()
+                    log.info_cat(
+                        Category.PLAYBACK,
+                        "stream_fetch_start",
+                        guild_id=player.guild_id,
+                        video_id=item.video_id,
+                        timeout_s=self.STREAM_FETCH_TIMEOUT,
+                    )
                     stream_info = await asyncio.wait_for(
                         self.youtube.get_stream_url(item.video_id),
                         timeout=self.STREAM_FETCH_TIMEOUT
+                    )
+                    log.info_cat(
+                        Category.PLAYBACK,
+                        "stream_fetch_end",
+                        guild_id=player.guild_id,
+                        video_id=item.video_id,
+                        ok=bool(stream_info),
+                        ms=int((time.perf_counter() - stream_t0) * 1000),
                     )
                 except asyncio.TimeoutError:
                     log.warning_cat(Category.PLAYBACK, "Stream URL fetch timed out", video_id=item.video_id)
@@ -844,14 +896,30 @@ class MusicCog(commands.Cog):
 
                 # Start prefetching next song in background (for discovery mode)
                 if player.autoplay and player.queue.empty():
+                    log.info_cat(Category.DISCOVERY, "discovery_prefetch_scheduled", guild_id=player.guild_id, video_id=item.video_id)
                     asyncio.create_task(self._prefetch_discovery_song(player))
                 elif player.pre_buffer and not player.queue.empty():
+                    log.info_cat(Category.QUEUE, "prebuffer_scheduled", guild_id=player.guild_id, video_id=item.video_id, queue_size=player.queue.qsize())
                     asyncio.create_task(self._pre_buffer_next(player))
 
                 # Play the audio
                 try:
                     ffmpeg_opts = self._build_ffmpeg_options(stream_info)
+                    probe_t0 = time.perf_counter()
+                    log.info_cat(
+                        Category.PLAYBACK,
+                        "ffmpeg_probe_start",
+                        guild_id=player.guild_id,
+                        video_id=item.video_id,
+                    )
                     source = await discord.FFmpegOpusAudio.from_probe(stream_info.url, **ffmpeg_opts)
+                    log.info_cat(
+                        Category.PLAYBACK,
+                        "ffmpeg_probe_end",
+                        guild_id=player.guild_id,
+                        video_id=item.video_id,
+                        ms=int((time.perf_counter() - probe_t0) * 1000),
+                    )
                     
                     play_complete = asyncio.Event()
                     
@@ -866,6 +934,10 @@ class MusicCog(commands.Cog):
                     
                     player.voice_client.play(source, after=after_play)
                     player.start_time = datetime.now(UTC)
+
+                    # Don’t delay playback for Spotify/metadata. Enrich in background and refresh Now Playing.
+                    log.info_cat(Category.API, "spotify_enrich_scheduled", guild_id=player.guild_id, video_id=item.video_id)
+                    asyncio.create_task(self._spotify_enrich_and_refresh_now_playing(player, item))
                     
                     log.event(
                         Category.PLAYBACK, Event.TRACK_STARTED,
@@ -875,7 +947,16 @@ class MusicCog(commands.Cog):
                     )
                     
                     # Send Now Playing embed
+                    np_t0 = time.perf_counter()
+                    log.info_cat(Category.PLAYBACK, "now_playing_send_start", guild_id=player.guild_id, video_id=item.video_id)
                     await self._send_now_playing(player)
+                    log.info_cat(
+                        Category.PLAYBACK,
+                        "now_playing_send_end",
+                        guild_id=player.guild_id,
+                        video_id=item.video_id,
+                        ms=int((time.perf_counter() - np_t0) * 1000),
+                    )
                     
                     # Wait for song to finish WITH TIMEOUT for self-healing
                     # Use song duration + buffer, or default safety timeout
@@ -884,7 +965,23 @@ class MusicCog(commands.Cog):
                         max_wait = item.duration_seconds + 60  # Song duration + 1 min buffer
                     
                     try:
+                        wait_t0 = time.perf_counter()
+                        log.info_cat(
+                            Category.PLAYBACK,
+                            "playback_wait_start",
+                            guild_id=player.guild_id,
+                            video_id=item.video_id,
+                            max_wait_s=max_wait,
+                            duration_seconds=item.duration_seconds,
+                        )
                         await asyncio.wait_for(play_complete.wait(), timeout=max_wait)
+                        log.info_cat(
+                            Category.PLAYBACK,
+                            "playback_wait_end",
+                            guild_id=player.guild_id,
+                            video_id=item.video_id,
+                            ms=int((time.perf_counter() - wait_t0) * 1000),
+                        )
                     except asyncio.TimeoutError:
                         log.warning_cat(Category.PLAYBACK, "Playback timeout - auto-healing", 
                                        title=item.title, max_wait=max_wait)
@@ -894,24 +991,26 @@ class MusicCog(commands.Cog):
                     
                     # Database: Log Playback End
                     if hasattr(self.bot, "db") and self.bot.db and item.history_id:
-                         try:
-                             playback_crud = PlaybackCRUD(self.bot.db)
-                             # Default true unless skipped (we can check skip_votes or logic later, but for now assumption is valid if we reached here without break)
-                             # If skipping happens, strict logic is needed, but 'completed' usually means 'finished playing' or 'was played'. 
-                             # Here we mark it completed. If skipped, we might want to update it differently, but mark_completed takes a bool.
-                             # If we were skipped, the wait() is broken? No, stop() calls after_play.
-                             # So we check if we were stopped forcefully. 
-                             # For simplicity, we mark completed=True. Refinement: if queue was cleared or force skipped?
-                             # Let's assume True for now, user analytics usually count partial plays too.
-                             completed = True
-                             
-                             # Check if skipped via votes (rough check)
-                             if player.skip_votes and len(player.skip_votes) > 0:
-                                 completed = False
-                                 
-                             await playback_crud.mark_completed(item.history_id, completed)
-                         except Exception as e:
-                             log.error_cat(Category.DATABASE, "Failed to log playback end", error=str(e))
+                        try:
+                            playback_crud = PlaybackCRUD(self.bot.db)
+                            completed = True
+
+                            if player.skip_votes and len(player.skip_votes) > 0:
+                                completed = False
+
+                            await playback_crud.mark_completed(item.history_id, completed)
+                        except Exception as e:
+                            log.error_cat(Category.DATABASE, "Failed to log playback end", error=str(e))
+
+                    log.info_cat(
+                        Category.PLAYBACK,
+                        "track_playback_cycle_end",
+                        guild_id=player.guild_id,
+                        video_id=item.video_id,
+                        title=item.title,
+                        artist=item.artist,
+                        ms_since_iteration_start=int((time.perf_counter() - iteration_t0) * 1000),
+                    )
                     
                 except Exception as e:
                     log.event(Category.PLAYBACK, Event.PLAYBACK_ERROR, level=logging.ERROR, title=item.title, error=str(e))
@@ -1085,6 +1184,69 @@ class MusicCog(commands.Cog):
         
         log.warning_cat(Category.DISCOVERY, "No chart tracks found via any method")
         return None
+
+    async def _spotify_enrich_and_refresh_now_playing(self, player: GuildPlayer, item: QueueItem):
+        """Enrich current track metadata via Spotify without delaying playback, then refresh Now Playing."""
+        spotify = getattr(self.bot, "spotify", None)
+        if not spotify:
+            return
+
+        if item.year and item.genre:
+            return
+
+        try:
+            query = f"{item.artist} {item.title}"
+            sp_track = await asyncio.wait_for(
+                spotify.search_track(query),
+                timeout=self.SPOTIFY_ENRICH_TIMEOUT,
+            )
+            if not sp_track:
+                return
+
+            if not item.year:
+                item.year = sp_track.release_year
+
+            artist = await asyncio.wait_for(
+                spotify.get_artist(sp_track.artist_id),
+                timeout=self.SPOTIFY_ENRICH_TIMEOUT,
+            )
+            if artist and artist.genres and not item.genre:
+                item.genre = artist.genres[0].title()
+
+            if hasattr(self.bot, "db") and self.bot.db and item.song_db_id:
+                try:
+                    song_crud = SongCRUD(self.bot.db)
+
+                    if item.genre:
+                        await song_crud.clear_genres(item.song_db_id)
+                        await song_crud.add_genre(item.song_db_id, item.genre)
+
+                    await song_crud.get_or_create_by_yt_id(
+                        canonical_yt_id=item.video_id,
+                        title=item.title,
+                        artist_name=item.artist,
+                        release_year=item.year,
+                        duration_seconds=item.duration_seconds,
+                    )
+                except Exception as e:
+                    log.debug_cat(Category.DATABASE, "Failed to persist Spotify enrichment", error=str(e))
+
+        except asyncio.TimeoutError:
+            log.debug_cat(Category.API, "Spotify enrichment timed out", title=item.title, artist=item.artist)
+            return
+        except Exception as e:
+            log.debug_cat(Category.API, "Spotify enrichment failed", error=str(e))
+            return
+
+        # Only refresh if this is still the currently playing item.
+        try:
+            # Give the initial Now Playing send a chance to complete to avoid racing two sends.
+            await asyncio.sleep(1)
+            if not player.current or player.current.video_id != item.video_id:
+                return
+            await self._send_now_playing(player)
+        except Exception as e:
+            log.debug_cat(Category.SYSTEM, "Failed to refresh Now Playing after Spotify enrichment", error=str(e))
     
     async def _send_now_playing(self, player: GuildPlayer):
         """Send Now Playing image to the text channel."""

@@ -24,10 +24,6 @@ data/
 *.swp
 *.swo
 
-# Logs
-*.log
-logs/
-
 # OS
 .DS_Store
 Thumbs.db

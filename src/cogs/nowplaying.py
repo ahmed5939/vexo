@@ -444,11 +444,33 @@ class NowPlayingCog(commands.Cog):
 
     async def send_now_playing_for_player(self, player) -> None:
         """Send/replace the Now Playing message for the given guild player."""
+        log.info_cat(
+            Category.SYSTEM,
+            "send_now_playing_for_player called",
+            guild_id=player.guild_id,
+            has_current=bool(player.current),
+            has_text_channel_id=bool(player.text_channel_id),
+            title=getattr(player.current, "title", None) if player.current else None,
+            text_channel_id=player.text_channel_id,
+        )
         if not player.current or not player.text_channel_id:
+            log.debug_cat(
+                Category.SYSTEM,
+                "send_now_playing_for_player early return",
+                guild_id=player.guild_id,
+                has_current=bool(player.current),
+                has_text_channel_id=bool(player.text_channel_id),
+            )
             return
 
         channel = self.bot.get_channel(player.text_channel_id)
         if not channel:
+            log.debug_cat(
+                Category.SYSTEM,
+                "send_now_playing_for_player channel not found",
+                guild_id=player.guild_id,
+                text_channel_id=player.text_channel_id,
+            )
             return
 
         async with player._np_lock:

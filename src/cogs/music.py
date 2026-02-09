@@ -584,11 +584,14 @@ class MusicCog(commands.Cog):
 
     async def _notify_now_playing(self, player: GuildPlayer):
         """Ask the NowPlaying cog to render/update the Now Playing message."""
+        log.debug_cat(Category.SYSTEM, "_notify_now_playing called", guild_id=player.guild_id)
         np = self.bot.get_cog("NowPlayingCog")
         if not np:
+            log.debug_cat(Category.SYSTEM, "NowPlayingCog not found", guild_id=player.guild_id)
             return
         send_fn = getattr(np, "send_now_playing_for_player", None)
         if not send_fn:
+            log.debug_cat(Category.SYSTEM, "send_now_playing_for_player method not found", guild_id=player.guild_id)
             return
         try:
             await send_fn(player)

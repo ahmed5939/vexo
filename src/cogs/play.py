@@ -74,12 +74,19 @@ class PlayCog(commands.Cog):
 
             voice_channel = interaction.user.voice.channel
             player = music.get_player(interaction.guild_id)
+            player.text_channel_id = interaction.channel_id
 
             # Connect to voice channel if not already
             if not player.voice_client or not player.voice_client.is_connected():
                 try:
                     player.voice_client = await voice_channel.connect(self_deaf=True, timeout=20.0)
                     log.event(Category.VOICE, Event.VOICE_CONNECTED, channel=voice_channel.name, guild=interaction.guild.name)
+                    
+                    # After reconnection, restart playback if there are queued items
+                    if not player.is_playing and not player.queue.empty():
+                        player.is_playing = True
+                        asyncio.create_task(music._play_loop(player))
+                        log.event(Category.PLAYBACK, Event.PLAYBACK_STARTED, guild_id=interaction.guild_id, reason="reconnection")
                 except Exception as e:
                     try:
                         await interaction.followup.send(f"❌ Failed to connect: {e}", ephemeral=True)
@@ -200,7 +207,6 @@ class PlayCog(commands.Cog):
             )
             player.queue.put_at_front(item)
             player.last_activity = datetime.now(UTC)
-            player.text_channel_id = interaction.channel_id
 
             if not player.is_playing:
                 asyncio.create_task(music._play_loop(player))
@@ -255,10 +261,17 @@ class PlayCog(commands.Cog):
 
             voice_channel = interaction.user.voice.channel
             player = music.get_player(interaction.guild_id)
+            player.text_channel_id = interaction.channel_id
 
             if not player.voice_client or not player.voice_client.is_connected():
                 try:
                     player.voice_client = await voice_channel.connect(self_deaf=True, timeout=20.0)
+                    
+                    # After reconnection, restart playback if there are queued items
+                    if not player.is_playing and not player.queue.empty():
+                        player.is_playing = True
+                        asyncio.create_task(music._play_loop(player))
+                        log.event(Category.PLAYBACK, Event.PLAYBACK_STARTED, guild_id=interaction.guild_id, reason="reconnection")
                 except Exception as e:
                     await interaction.followup.send(f"❌ Failed to connect: {e}", ephemeral=True)
                     return
@@ -324,7 +337,6 @@ class PlayCog(commands.Cog):
                 return
 
             player.last_activity = datetime.now(UTC)
-            player.text_channel_id = interaction.channel_id
 
             if not player.is_playing:
                 asyncio.create_task(music._play_loop(player))
@@ -374,17 +386,23 @@ class PlayCog(commands.Cog):
 
             voice_channel = interaction.user.voice.channel
             player = music.get_player(interaction.guild_id)
+            player.text_channel_id = interaction.channel_id
 
             if not player.voice_client or not player.voice_client.is_connected():
                 try:
                     player.voice_client = await voice_channel.connect(self_deaf=True, timeout=20.0)
+                    
+                    # After reconnection, restart playback if there are queued items
+                    if not player.is_playing and not player.queue.empty():
+                        player.is_playing = True
+                        asyncio.create_task(music._play_loop(player))
+                        log.event(Category.PLAYBACK, Event.PLAYBACK_STARTED, guild_id=interaction.guild_id, reason="reconnection")
                 except Exception as e:
                     await interaction.followup.send(f"❌ Failed to connect: {e}", ephemeral=True)
                     return
 
             player.autoplay = True
             player.last_activity = datetime.now(UTC)
-            player.text_channel_id = interaction.channel_id
 
             if not player.is_playing:
                 asyncio.create_task(music._play_loop(player))

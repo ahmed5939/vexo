@@ -121,7 +121,7 @@ class NowPlayingView(discord.ui.View):
             log.exception_cat(Category.SYSTEM, "NowPlayingView pause/resume failed", error=str(e))
             return
 
-    @discord.ui.button(emoji="⏹️", style=discord.ButtonStyle.danger, custom_id="np:stop")
+    @discord.ui.button(emoji="⏹", style=discord.ButtonStyle.danger, custom_id="np:stop")
     async def stop(self, interaction: discord.Interaction, button: discord.ui.Button):
         with log.span(
             Category.USER,

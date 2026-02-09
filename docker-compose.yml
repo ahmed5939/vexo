@@ -1,8 +1,9 @@
 services:
   musicbot:
-    build: .
+    image: ghcr.io/jamesabrownlee/vexo-bot:latest
     container_name: smart-music-bot
     restart: unless-stopped
+    pull_policy: always
     environment:
       - DISCORD_TOKEN=${DISCORD_TOKEN}
       - SPOTIFY_CLIENT_ID=${SPOTIFY_CLIENT_ID}

@@ -46,6 +46,7 @@ class MusicBot(commands.Bot):
 
         # Interaction timing (for command start/end logs)
         self._interaction_started: dict[int, float] = {}
+        self._loop_lag_task: asyncio.Task | None = None
 
     @staticmethod
     def _truncate(value, max_len: int = 240) -> str:
@@ -116,12 +117,44 @@ class MusicBot(commands.Bot):
 
     async def on_interaction(self, interaction: discord.Interaction) -> None:
         # Track timing for application commands, and emit a "received" log early.
-        if interaction and interaction.id:
-            self._log_interaction_start(interaction)
-            if interaction.type == discord.InteractionType.application_command:
-                self._interaction_started[interaction.id] = time.perf_counter()
+        # Never allow tracing/logging to break Discord's interaction pipeline.
+        try:
+            if interaction and interaction.id:
+                self._log_interaction_start(interaction)
+                if interaction.type == discord.InteractionType.application_command:
+                    self._interaction_started[interaction.id] = time.perf_counter()
+        except Exception as e:
+            try:
+                log.exception_cat(
+                    Category.SYSTEM,
+                    "interaction_trace_failed",
+                    module=__name__,
+                    interaction_id=getattr(interaction, "id", None),
+                    interaction_type=str(getattr(getattr(interaction, "type", None), "name", getattr(interaction, "type", None))),
+                    error=self._truncate(e),
+                )
+            except Exception:
+                pass
 
-        return await super().on_interaction(interaction)
+        try:
+            return await super().on_interaction(interaction)
+        except Exception as e:
+            # Prevent "Ignoring exception in on_interaction" without losing the error.
+            try:
+                log.exception_cat(
+                    Category.SYSTEM,
+                    "on_interaction_error",
+                    module=__name__,
+                    interaction_id=getattr(interaction, "id", None),
+                    interaction_type=str(getattr(getattr(interaction, "type", None), "name", getattr(interaction, "type", None))),
+                    guild_id=getattr(interaction, "guild_id", None),
+                    channel_id=getattr(getattr(interaction, "channel", None), "id", None),
+                    user_id=getattr(getattr(interaction, "user", None), "id", None),
+                    error=self._truncate(e),
+                )
+            except Exception:
+                pass
+            return None
 
     async def on_app_command_completion(self, interaction: discord.Interaction, command) -> None:
         t0 = self._interaction_started.pop(getattr(interaction, "id", 0), None)
@@ -173,6 +206,10 @@ class MusicBot(commands.Bot):
     async def setup_hook(self) -> None:
         """Called when the bot is starting up."""
         log.event(Category.SYSTEM, "setup_started")
+
+        # Event loop lag monitor (helps diagnose interaction 404s caused by stalls)
+        if not self._loop_lag_task:
+            self._loop_lag_task = asyncio.create_task(self._loop_lag_monitor())
         
         # Store start time for uptime tracking
         from datetime import datetime, UTC
@@ -279,6 +316,10 @@ class MusicBot(commands.Bot):
     async def close(self) -> None:
         """Cleanup when the bot is shutting down."""
         log.event(Category.SYSTEM, "shutdown_started")
+
+        if self._loop_lag_task:
+            self._loop_lag_task.cancel()
+            self._loop_lag_task = None
         
         # Disconnect from all voice channels
         for vc in self.voice_clients:
@@ -288,6 +329,19 @@ class MusicBot(commands.Bot):
                 pass
         
         await super().close()
+
+    async def _loop_lag_monitor(self) -> None:
+        """Periodically measure event-loop lag and log warnings when it spikes."""
+        interval = 1.0
+        warn_ms = 500
+        last = time.perf_counter()
+        while True:
+            await asyncio.sleep(interval)
+            now = time.perf_counter()
+            drift_ms = int((now - last - interval) * 1000)
+            last = now
+            if drift_ms >= warn_ms:
+                log.warning_cat(Category.SYSTEM, "event_loop_lag", module=__name__, drift_ms=drift_ms)
 
 
 async def main():

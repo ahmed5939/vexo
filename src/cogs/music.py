@@ -148,7 +148,6 @@ class MusicCog(commands.Cog):
                     if player.queue.empty():
                         if player.autoplay:
                             # Check max duration setting
-                            from src.database.crud import GuildCRUD
                             guild_crud = GuildCRUD(self.bot.db) if hasattr(self.bot, "db") else None
                             max_seconds = 0
                             if guild_crud:
@@ -519,7 +518,6 @@ class MusicCog(commands.Cog):
                 # Get Cooldown Setting
                 cooldown = 7200 # Default 2 hours
                 if hasattr(self.bot, "db"):
-                    from src.database.crud import GuildCRUD
                     guild_crud = GuildCRUD(self.bot.db)
                     setting = await guild_crud.get_setting(player.guild_id, "replay_cooldown")
                     if setting:
@@ -580,7 +578,6 @@ class MusicCog(commands.Cog):
         
         try:
             # Get max duration setting
-            from src.database.crud import GuildCRUD
             guild_crud = GuildCRUD(self.bot.db) if hasattr(self.bot, "db") else None
             max_seconds = 0
             if guild_crud:

@@ -186,6 +186,109 @@ class YouTubeService:
         except Exception as e:
             log.error_cat(Category.API, "Error getting playlist", error=str(e))
             return []
+
+    @retry_with_backoff()
+    async def get_track_info(self, video_id: str) -> YTTrack | None:
+        """Get detailed track info for a single video (duration, title, artist, year).
+
+        Used by discovery to fill missing duration/year fields.
+        """
+        loop = asyncio.get_event_loop()
+        url = f"https://www.youtube.com/watch?v={video_id}"
+
+        try:
+            # Prefer ytmusicapi's metadata first (non-blocking via executor)
+            try:
+                def fetch_via_ytmusic():
+                    return self.yt.get_song(video_id)
+
+                song_info = await loop.run_in_executor(None, fetch_via_ytmusic)
+                if song_info:
+                    # ytmusicapi returns nested structures; be defensive when reading
+                    video_details = song_info.get("videoDetails") if isinstance(song_info, dict) else None
+                    if video_details:
+                        title = video_details.get("title") or song_info.get("title") or "Unknown"
+                        artist = video_details.get("author") or song_info.get("uploader") or "Unknown"
+                        duration = None
+                        try:
+                            ld = video_details.get("lengthSeconds")
+                            if ld:
+                                duration = int(ld)
+                        except Exception:
+                            duration = None
+
+                        year = None
+                        publish = video_details.get("publishDate") or video_details.get("uploadDate") or song_info.get("upload_date")
+                        if publish:
+                            try:
+                                year = int(str(publish)[0:4])
+                            except Exception:
+                                year = None
+
+                        thumbnail = None
+                        thumbs = song_info.get("thumbnails") or video_details.get("thumbnail")
+                        if thumbs and isinstance(thumbs, list):
+                            thumbnail = thumbs[-1].get("url") if thumbs[-1] else None
+
+                        return YTTrack(
+                            video_id=video_id,
+                            title=title,
+                            artist=artist,
+                            duration_seconds=duration,
+                            album=None,
+                            year=year,
+                            thumbnail_url=thumbnail,
+                        )
+            except Exception:
+                # Fall back to yt-dlp extraction below
+                pass
+
+            # Fallback: use yt-dlp if ytmusicapi didn't return usable info
+            def extract():
+                opts = {**self._ydl_opts, "skip_download": True, "quiet": True, "no_warnings": True}
+                with yt_dlp.YoutubeDL(opts) as ydl:
+                    info = ydl.extract_info(url, download=False)
+                    return info
+
+            info = await loop.run_in_executor(None, extract)
+            if not info:
+                return None
+
+            duration = info.get("duration")
+            title = info.get("title") or "Unknown"
+
+            # Best-effort artist detection: prefer explicit metadata, fall back to uploader
+            artist = info.get("artist") or info.get("uploader") or "Unknown"
+
+            year = None
+            if info.get("release_date"):
+                try:
+                    year = int(info["release_date"][0:4])
+                except Exception:
+                    pass
+            elif info.get("upload_date"):
+                try:
+                    year = int(info["upload_date"][0:4])
+                except Exception:
+                    pass
+
+            thumbnail = None
+            thumbs = info.get("thumbnails")
+            if thumbs and isinstance(thumbs, list):
+                thumbnail = thumbs[-1].get("url") if thumbs[-1] else None
+
+            return YTTrack(
+                video_id=video_id,
+                title=title,
+                artist=artist,
+                duration_seconds=duration,
+                album=None,
+                year=year,
+                thumbnail_url=thumbnail,
+            )
+        except Exception as e:
+            log.event(Category.API, Event.API_ERROR, level=logging.ERROR, service="youtube", video_id=video_id, error=str(e))
+            return None
     
     @retry_with_backoff(retries=2, backoff_in_seconds=1)
     async def get_stream_url(self, video_id: str) -> StreamInfo | None:

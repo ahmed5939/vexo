@@ -474,7 +474,7 @@ class NowPlayingCog(commands.Cog):
 
         loading_embed = discord.Embed(
             title="🎵 Now Playing",
-            description=f"**{item.title}**\n{item.artist}\n\n⏳ Loading artwork…",
+            description=f"<a:loadingload:1470532660781908081>",
             color=0x7c3aed,
         )
         if item.discovery_reason:
@@ -529,15 +529,15 @@ class NowPlayingCog(commands.Cog):
                 if msg is not None:
                     try:
                         try:
-                            await msg.edit(content="<a:loadingload:1470532660781908081>", view=view, attachments=[])
+                            await msg.edit(embed=loading_embed, view=view, attachments=[])
                         except TypeError:
                             # Older libs may not support attachments= in edit.
-                            await msg.edit(content="<a:loadingload:1470532660781908081>", view=view)
+                            await msg.edit(embed=loading_embed, view=view)
                     except Exception:
                         msg = None
 
                 if msg is None:
-                    msg = await channel.send(content="<a:loadingload:1470532660781908081>", view=view)
+                    msg = await channel.send(embed=loading_embed, view=view)
 
                 player.last_np_msg = msg
 

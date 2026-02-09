@@ -24,12 +24,34 @@ log = get_logger(__name__)
 
 
 class NowPlayingView(discord.ui.View):
-    """Interactive Now Playing controls."""
+    """Interactive Now Playing controls with dynamic queue select."""
 
     # Persistent view: timeout must be None and every component needs a custom_id.
-    def __init__(self, bot: commands.Bot):
+    def __init__(self, bot: commands.Bot, queue_items: list = None):
         super().__init__(timeout=None)
         self.bot = bot
+        
+        # Add select menu with queue items if provided
+        if queue_items:
+            select_options = [
+                discord.SelectOption(
+                    label=f"{i+1}. {qi.title[:50]}",
+                    description=qi.artist[:100],
+                    value=str(i)
+                )
+                for i, qi in enumerate(queue_items[:10])  # Limit to 10 items
+            ]
+            if select_options:
+                select = discord.ui.Select(
+                    cls=discord.ui.Select,
+                    placeholder="⏭️ Skip to a song...",
+                    custom_id="np:skip_to",
+                    options=select_options,
+                    min_values=1,
+                    max_values=1,
+                )
+                select.callback = self.skip_to_callback
+                self.add_item(select)
 
     @property
     def music(self):
@@ -304,14 +326,14 @@ class NowPlayingView(discord.ui.View):
             log.exception_cat(Category.SYSTEM, "NowPlayingView dislike failed", error=str(e))
             return
 
-    @discord.ui.button(emoji="📜", style=discord.ButtonStyle.secondary, label="Up Next", custom_id="np:show_queue")
-    async def show_queue(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def skip_to_callback(self, interaction: discord.Interaction):
+        """Skip to a specific song in the queue (callback for dynamic select)."""
         with log.span(
             Category.USER,
-            "np_button_show_queue",
+            "np_select_skip_to",
             module=__name__,
             view="NowPlayingView",
-            custom_id=getattr(button, "custom_id", None),
+            custom_id="np:skip_to",
             guild_id=interaction.guild_id,
             user_id=getattr(interaction.user, "id", None),
         ):
@@ -324,50 +346,32 @@ class NowPlayingView(discord.ui.View):
 
         guild_id = self._guild_id_from_interaction(interaction)
         if not guild_id:
+            await self._safe_send(interaction, "❌ This can only be used in a server.", ephemeral=True)
             return
 
         try:
             player = music.get_player(guild_id)
-            
-            # Fetch next 10 items for the image
-            queue_items = list(player.queue._queue)[:10]
-            
-            serializable_items = []
-            for item in queue_items:
-                requester_name = "Discovery"
-                if item.requester_id:
-                    member = interaction.guild.get_member(item.requester_id)
-                    requester_name = member.display_name if member else "User"
-                elif item.for_user_id:
-                    member = interaction.guild.get_member(item.for_user_id)
-                    requester_name = member.display_name if member else "Discovery"
+            # Selected value is present in interaction.data['values']
+            values = interaction.data.get("values") if isinstance(interaction.data, dict) else None
+            selected_index = int(values[0]) if values and len(values) > 0 else 0
+            queue_items = list(player.queue._queue)
 
-                serializable_items.append({
-                    "title": item.title,
-                    "artist": item.artist,
-                    "requester": requester_name
-                })
+            if selected_index < 0 or selected_index >= len(queue_items):
+                await self._safe_send(interaction, "❌ Invalid queue position.", ephemeral=True)
+                return
 
-            import json
-            from urllib.parse import quote
-            
-            items_json = json.dumps(serializable_items)
-            guild_name = interaction.guild.name
-            
-            image_url = f"http://dashboard:3000/api/queue/image?guild={quote(guild_name)}&items={quote(items_json)}"
-            
-            async with aiohttp.ClientSession() as session:
-                async with session.get(image_url, timeout=10) as resp:
-                    if resp.status == 200:
-                        image_data = await resp.read()
-                        file = discord.File(io.BytesIO(image_data), filename="queue.png")
-                        await interaction.followup.send(file=file, ephemeral=True)
-                    else:
-                        await interaction.followup.send("❌ Failed to generate queue image.", ephemeral=True)
-                        
+            # Remove all items before the selected index
+            for _ in range(selected_index):
+                try:
+                    player.queue.get_nowait()
+                except asyncio.QueueEmpty:
+                    break
+
+            selected_song = queue_items[selected_index]
+            await self._safe_send(interaction, f"⏭️ Skipped to **{selected_song.title}**", ephemeral=True)
         except Exception as e:
-            log.exception_cat(Category.SYSTEM, "NowPlayingView show_queue failed", error=str(e))
-            await self._safe_send(interaction, "❌ Error showing queue.", ephemeral=True)
+            log.exception_cat(Category.SYSTEM, "NowPlayingView skip_to failed", error=str(e))
+            await self._safe_send(interaction, "❌ Error skipping to song.", ephemeral=True)
 
 
 class NowPlayingCog(commands.Cog):
@@ -545,7 +549,9 @@ class NowPlayingCog(commands.Cog):
             query_str = "&".join([f"{k}={quote_plus(str(v))}" for k, v in params.items()])
             image_url = f"http://dashboard:3000/api/now-playing/image?{query_str}"
 
-            view = NowPlayingView(self.bot)
+            # Create view with dynamic queue select options (top 10)
+            queue_items = list(player.queue._queue)[:10]
+            view = NowPlayingView(self.bot, queue_items=queue_items)
             try:
                 async with aiohttp.ClientSession() as session:
                     async with session.get(image_url, timeout=5) as resp:

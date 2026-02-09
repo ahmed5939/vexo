@@ -596,13 +596,16 @@ class MusicCog(commands.Cog):
             log.debug_cat(Category.SYSTEM, "NowPlaying update failed", error=str(e), guild_id=player.guild_id)
 
     async def _spotify_enrich_and_refresh_now_playing(self, player: GuildPlayer, item: QueueItem):
-        """Enrich current track metadata via Spotify without delaying playback, then refresh Now Playing."""
+        """Enrich current track metadata via Spotify without delaying playback, then refresh Now Playing only if data changed."""
         spotify = getattr(self.bot, "spotify", None)
         if not spotify:
             return
 
         if item.year and item.genre:
             return
+
+        # Track what changed to decide if we should refresh
+        metadata_changed = False
 
         try:
             query = f"{item.artist} {item.title}"
@@ -615,6 +618,7 @@ class MusicCog(commands.Cog):
 
             if not item.year:
                 item.year = sp_track.release_year
+                metadata_changed = True
 
             artist = await asyncio.wait_for(
                 spotify.get_artist(sp_track.artist_id),
@@ -622,6 +626,7 @@ class MusicCog(commands.Cog):
             )
             if artist and artist.genres and not item.genre:
                 item.genre = artist.genres[0].title()
+                metadata_changed = True
 
             if hasattr(self.bot, "db") and self.bot.db and item.song_db_id:
                 try:
@@ -648,15 +653,16 @@ class MusicCog(commands.Cog):
             log.debug_cat(Category.API, "Spotify enrichment failed", error=str(e))
             return
 
-        # Only refresh if this is still the currently playing item.
-        try:
-            # Give the initial Now Playing send a chance to complete to avoid racing two sends.
-            await asyncio.sleep(1)
-            if not player.current or player.current.video_id != item.video_id:
-                return
-            await self._notify_now_playing(player)
-        except Exception as e:
-            log.debug_cat(Category.SYSTEM, "Failed to refresh Now Playing after Spotify enrichment", error=str(e))
+        # Only refresh Now Playing if metadata actually changed and this is still the current song
+        if metadata_changed:
+            try:
+                # Give the initial Now Playing send a chance to complete to avoid racing two sends.
+                await asyncio.sleep(1)
+                if not player.current or player.current.video_id != item.video_id:
+                    return
+                await self._notify_now_playing(player)
+            except Exception as e:
+                log.debug_cat(Category.SYSTEM, "Failed to refresh Now Playing after Spotify enrichment", error=str(e))
     
 
     async def _pre_buffer_next(self, player: GuildPlayer):

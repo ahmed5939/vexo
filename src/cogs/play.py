@@ -198,7 +198,7 @@ class PlayCog(commands.Cog):
                 duration_seconds=duration_seconds,
                 year=track.year,
             )
-            await player.queue.put(item)
+            player.queue.put_at_front(item)
             player.last_activity = datetime.now(UTC)
             player.text_channel_id = interaction.channel_id
 
@@ -284,8 +284,8 @@ class PlayCog(commands.Cog):
             tracks_to_add = top_tracks[:5]
             queued_count = 0
 
-            song_db_id = None
-            for yt_track in tracks_to_add:
+            # Add tracks in reverse order so they appear in correct top-5 order at the front
+            for yt_track in reversed(tracks_to_add):
                 try:
                     song_db_id = None
                     if hasattr(self.bot, "db") and self.bot.db:
@@ -314,7 +314,7 @@ class PlayCog(commands.Cog):
                         duration_seconds=yt_track.duration_seconds,
                         year=yt_track.year,
                     )
-                    await player.queue.put(item)
+                    player.queue.put_at_front(item)
                     queued_count += 1
                 except Exception as e:
                     log.error_cat(Category.SYSTEM, "Failed to queue artist track", error=str(e), title=getattr(yt_track, "title", None))

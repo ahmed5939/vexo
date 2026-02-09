@@ -304,6 +304,71 @@ class NowPlayingView(discord.ui.View):
             log.exception_cat(Category.SYSTEM, "NowPlayingView dislike failed", error=str(e))
             return
 
+    @discord.ui.button(emoji="📜", style=discord.ButtonStyle.secondary, label="Up Next", custom_id="np:show_queue")
+    async def show_queue(self, interaction: discord.Interaction, button: discord.ui.Button):
+        with log.span(
+            Category.USER,
+            "np_button_show_queue",
+            module=__name__,
+            view="NowPlayingView",
+            custom_id=getattr(button, "custom_id", None),
+            guild_id=interaction.guild_id,
+            user_id=getattr(interaction.user, "id", None),
+        ):
+            if not await self._safe_defer(interaction, ephemeral=True):
+                return
+
+        music = self.music
+        if not music:
+            return
+
+        guild_id = self._guild_id_from_interaction(interaction)
+        if not guild_id:
+            return
+
+        try:
+            player = music.get_player(guild_id)
+            
+            # Fetch next 10 items for the image
+            queue_items = list(player.queue._queue)[:10]
+            
+            serializable_items = []
+            for item in queue_items:
+                requester_name = "Discovery"
+                if item.requester_id:
+                    member = interaction.guild.get_member(item.requester_id)
+                    requester_name = member.display_name if member else "User"
+                elif item.for_user_id:
+                    member = interaction.guild.get_member(item.for_user_id)
+                    requester_name = member.display_name if member else "Discovery"
+
+                serializable_items.append({
+                    "title": item.title,
+                    "artist": item.artist,
+                    "requester": requester_name
+                })
+
+            import json
+            from urllib.parse import quote
+            
+            items_json = json.dumps(serializable_items)
+            guild_name = interaction.guild.name
+            
+            image_url = f"http://dashboard:3000/api/queue/image?guild={quote(guild_name)}&items={quote(items_json)}"
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.get(image_url, timeout=10) as resp:
+                    if resp.status == 200:
+                        image_data = await resp.read()
+                        file = discord.File(io.BytesIO(image_data), filename="queue.png")
+                        await interaction.followup.send(file=file, ephemeral=True)
+                    else:
+                        await interaction.followup.send("❌ Failed to generate queue image.", ephemeral=True)
+                        
+        except Exception as e:
+            log.exception_cat(Category.SYSTEM, "NowPlayingView show_queue failed", error=str(e))
+            await self._safe_send(interaction, "❌ Error showing queue.", ephemeral=True)
+
 
 class NowPlayingCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
